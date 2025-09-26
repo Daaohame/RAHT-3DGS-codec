@@ -1,0 +1,3 @@
+[submodule "matlab/RA-GFT"]
+	path = matlab/RA-GFT
+	url = https://github.com/STAC-USC/RA-GFT.git
