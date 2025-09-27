@@ -1,63 +1,61 @@
 function [List,Flags,weights]=RAHT_param(V,minV,width,depth)
-%computes index list, and flags for RAHT and iRAHT transforms
-%V: quantized and voxelized(morton order)
+% computes index list, and flags for RAHT and iRAHT transforms
+% V: quantized and voxelized(morton order) is derived here from V (double)
 
-%compute morton code
+    Q     = width/2^depth;
+    sizeV = size(V,1);
 
-Q=width/2^depth;
-sizeV=size(V,1);
-Vint= floor((V-repmat(minV,sizeV,1))/Q);
+    % Quantize to voxel indices (expect in-range)
+    Vint = floor((V - repmat(minV,sizeV,1)) / Q);
+    if any(Vint(:) < 0) || any(Vint(:) > 2^depth - 1)
+        error('RAHT_param:OutOfBounds', ...
+            'Quantized indices must be within [0, 2^depth-1] per axis. Check minV/width/depth.');
+    end
+    Vint = uint64(Vint);
 
-
-MC=zeros(sizeV,1);
-tri=[1;2;4];
-
-
-for i=1:depth
-
-    MC=MC+fliplr(bitget(Vint,i,'uint64'))*tri;
-    
-    tri=8*tri;
-
-end
-
-
- %%%%%%now create list and flag arrays
-    Nbits=3*depth;
-    List=cell(Nbits,1);
-    Flags=cell(Nbits,1);
-    %weight array
-    weights=cell(Nbits,1);
-    %initialize list
-    List{1}=(1:1:sizeV)';
-    %64=max number of bits of an integer in matlab (uint64)
-    for j=1:64
-        
-        %compute weights
-        weights{j}=[List{j}(2:end);sizeV+1]-List{j};
-        
-        
-        Mj=uint64(MC(List{j}));
-        
-        diff=bitxor(Mj(1:end-1),Mj(2:end),'uint64');% put a 1 in i-th position if i-th bits are different
-        
-        %check if Nbits-j most significant bits are equal, have same prefix
-        %at level j
-        masked=bitand(diff,uint64(2^Nbits-2^j));%2^Nbits-1 -(2^j-1)
-        
-        Flags{j}=[masked==0;0];
-        
-        tmpList=List{j}(~[0;Flags{j}(1:end-1)]);
-        if(size(tmpList,1)==1)
-            break
-        end
-        List{j+1}=tmpList;
-        
+    %%% compute morton code (uint64, no integer matrix multiply)
+    MC = zeros(sizeV,1,'uint64');
+    for i = 1:depth
+        b     = bitget(Vint, i);  % N×3 (x,y,z), 0/1 as double
+        digit = uint64(b(:,3)) + bitshift(uint64(b(:,2)),1) + bitshift(uint64(b(:,1)),2);
+        MC    = bitor(MC, bitshift(digit, 3*(i-1)));
     end
 
+    %%% create list and flag arrays
+    Nbits   = 3*depth;
+    List    = cell(Nbits,1);
+    Flags   = cell(Nbits,1);
+    weights = cell(Nbits,1);
 
+    List{1} = (1:sizeV)';
 
+    % 64 = max bits of uint64; break when list collapses
+    for j = 1:64
+        % run-length weights
+        weights{j} = [List{j}(2:end); sizeV+1] - List{j};
 
+        Mj = MC(List{j});
 
+        if numel(Mj) == 1
+            Flags{j} = false;
+            break
+        end
 
+        % bit differences between adjacent Morton codes
+        diff   = bitxor(Mj(1:end-1), Mj(2:end));     % uint64
+        mask   = bitshift(uint64(1), Nbits) - bitshift(uint64(1), j);  % 2^Nbits - 2^j, as uint64
+        masked = bitand(diff, mask);
+
+        Flags{j} = [masked == 0; false];
+
+        tmpList = List{j}(~[false; Flags{j}(1:end-1)]);
+        if numel(tmpList) == 1
+            break
+        end
+        List{j+1} = tmpList;
+
+        if j >= Nbits
+            break
+        end
+    end
 end
