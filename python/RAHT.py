@@ -2,6 +2,83 @@ import torch
 import torch.nn.functional as F
 from typing import List, Tuple, Union
 
+def RAHT(C, List, Flags, weights, device: Union[str, torch.device] = 'cuda'):
+    """
+    Converts the MATLAB RAHT function to Python using PyTorch.
+
+    Args:
+        C (torch.Tensor): Input tensor of shape [N, number_of_attributes].
+        List (list of torch.Tensor): List of index tensors for each level.
+        Flags (list of torch.Tensor): List of binary flag tensors for each level.
+        weights (list of torch.Tensor): List of weight tensors for each level.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing the transformed
+                                           tensor T and the updated weights w.
+    """
+    # Initialize T and w
+    T = C.clone().to(device)
+    w = torch.ones(C.size(0), 1, device=device, dtype=C.dtype)
+
+    # MATLAB: Nlevels=length(Flags); % of the octree
+    Nlevels = len(Flags)
+
+    # MATLAB: for j=1:Nlevels % bottom up
+    for j in range(Nlevels):
+
+        # MATLAB: left_sibling_index=Flags{j};
+        left_sibling_index = Flags[j]
+
+        # MATLAB: right_sibling_index=[0;Flags{j}(1:end-1)];
+        zero_tensor = torch.tensor([0], device=C.device, dtype=left_sibling_index.dtype)
+        right_sibling_index = torch.cat((zero_tensor, left_sibling_index[:-1]))
+
+        # Create boolean masks for logical indexing
+        i0_mask = (left_sibling_index == 1)
+        i1_mask = (right_sibling_index == 1)
+
+        # MATLAB: i0=List{j}(left_sibling_index==1);
+        i0 = List[j][i0_mask]
+
+        # MATLAB: i1=List{j}(right_sibling_index==1);
+        i1 = List[j][i1_mask]
+
+        # MATLAB: if(~isempty(i0) && ~isempty(i1))
+        if i0.numel() > 0 and i1.numel() > 0:
+            # MATLAB: x0=T(i0,:);
+            x0 = T[i0, :]
+            # MATLAB: x1=T(i1,:);
+            x1 = T[i1, :]
+
+            # MATLAB: w0=weights{j}(left_sibling_index==1);
+            w0 = weights[j][i0_mask]
+            # MATLAB: w1=weights{j}(right_sibling_index==1);
+            w1 = weights[j][i1_mask]
+
+            # MATLAB: a=sqrt(w0./(w0+w1));
+            # MATLAB: b=sqrt(w1./(w0+w1));
+            w_sum = w0 + w1
+            a = torch.sqrt(w0 / w_sum)
+            b = torch.sqrt(w1 / w_sum)
+
+            # MATLAB: w(i0)=w(i0)+w(i1);
+            # MATLAB: w(i1)=w(i0);
+            # Note: The second assignment in MATLAB uses the *updated* value of w(i0).
+            w_i0_updated = w[i0] + w[i1]
+            w[i0] = w_i0_updated
+            w[i1] = w_i0_updated
+
+            # MATLAB: T(i0,:)=repmat(a,1,signal_dimension).*x0+repmat(b,1,signal_dimension).*x1;
+            # MATLAB: T(i1,:)=-repmat(b,1,signal_dimension).*x0+repmat(a,1,signal_dimension).*x1;
+            # PyTorch's broadcasting automatically handles the expansion of a and b.
+            a_reshaped = a.view(-1, *([1] * (x0.ndim - 1)))
+            b_reshaped = b.view(-1, *([1] * (x0.ndim - 1)))
+            T[i0, :] = a_reshaped * x0 + b_reshaped * x1
+            T[i1, :] = -b_reshaped * x0 + a_reshaped * x1
+
+    return T, w
+
+
 def RAHT_optimized(C: torch.Tensor, 
                    List: List[torch.Tensor], 
                    Flags: List[torch.Tensor], 
@@ -22,9 +99,6 @@ def RAHT_optimized(C: torch.Tensor,
         T: Transformed coefficients [N, number_of_attributes]
         w: Updated weights [N, 1]
     """
-    
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
-    
     # Initialize T and w
     T = C.clone().to(device)
     w = torch.ones(C.size(0), 1, device=device, dtype=C.dtype)
@@ -95,9 +169,6 @@ def RAHT_batched(C: torch.Tensor,
     """
     Memory-efficient batched version for very large datasets
     """
-    
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
-    
     T = C.clone().to(device)
     w = torch.ones(C.size(0), 1, device=device, dtype=C.dtype)
     

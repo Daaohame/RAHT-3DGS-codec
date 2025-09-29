@@ -7,10 +7,17 @@ from scipy.io import savemat
 import matplotlib.pyplot as plt
 
 from data_util import read_ply_file
-from RAHT import RAHT_optimized
+from RAHT import RAHT, RAHT_optimized, RAHT_batched, RAHT_fused_kernel
 from iRAHT import inverse_RAHT_optimized
 from RAHT_param import RAHT_param
 # import RLGR_encoder
+
+VARIANTS = {
+    "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
+    "RAHT_optimized":   lambda C,L,F,W,d: RAHT_optimized(C, L, F, W, d),
+    "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
+    "RAHT_fused_kernel":lambda C,L,F,W,d: RAHT_fused_kernel(C, L, F, W, d),
+}
 
 DEBUG = True
 
@@ -44,10 +51,10 @@ def rgb_to_yuv_torch(rgb_tensor):
 ## Configuration
 ## ---------------------
 ply_list = ['/ssd1/haodongw/workspace/3dstream/3DGS_Compression_Adaptive_Voxelization/attributes_compressed/train_depth_15_thr_30_3DGS_adapt_lossless/train_dc.ply']
-J = 15
+J = 18
 T = len(ply_list)
 
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
 nSteps = len(colorStep)
@@ -64,7 +71,6 @@ for frame_idx in range(T):
     frame_start = time.time()
     
     V, Crgb = read_ply_file(ply_list[frame_idx])
-    breakpoint()
     N = V.shape[0]
     Nvox[frame_idx] = N
     # C = rgb_to_yuv_torch(Crgb)
@@ -81,23 +87,39 @@ for frame_idx in range(T):
     weightsC = [t.to(device) for t in weightsC]
     C = C.to(device)
     
-    t2 = time.time()
-    Coeff, w = RAHT_optimized(C, ListC, FlagsC, weightsC)
-    t3 = time.time()
-    raht_optimized_time = t3 - t2
-    
-    # Print timing information
-    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_optimized_time:.6f}s")
+    timings = {}
+    coeffs_by_variant = {}
+    for name, fn in VARIANTS.items():
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t2 = time.time()
+        out = fn(C, ListC, FlagsC, weightsC, device)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t3 = time.time()
+        Coeff = out[0] if (isinstance(out, (tuple, list)) and len(out) == 2) else out
+        timings[name] = t3 - t2
+        coeffs_by_variant[name] = Coeff
+        
+        if DEBUG:
+            print(f"Norm of C: {torch.norm(C)}")
+            print(f"Norm of Coeff: {torch.norm(Coeff)}")
+            print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
+            print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
+            print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
+            C_recon = inverse_RAHT_optimized(Coeff, ListC, FlagsC, weightsC, device)
+            if torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8):
+                print("Reconstruction check: True")
+            else:
+                print("Reconstruction check: False")
+                diff = C - C_recon
+                print("Max difference:", diff.abs().max().item())
+                print("Mean difference:", diff.abs().mean().item())
 
-    if DEBUG:
-        print(f"energy of C: {torch.norm(C)}")
-        print(f"energy of Coeff: {torch.norm(Coeff)}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT_optimized(Coeff, w, ListC, FlagsC, weightsC)
-        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
+    # Print timing info
+    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s")
+    for name, t in timings.items():
+        print(f"  {name}: {t:.6f}s")
     
     # # Sort weights in descending order
     # _, IX_ref = torch.sort(w, descending=True)

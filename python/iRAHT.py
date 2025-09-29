@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from typing import List, Tuple, Union
 
 def inverse_RAHT_optimized(T: torch.Tensor, 
-                           w: torch.Tensor,
                            List: List[torch.Tensor], 
                            Flags: List[torch.Tensor], 
                            weights: List[torch.Tensor],
@@ -22,9 +21,6 @@ def inverse_RAHT_optimized(T: torch.Tensor,
     Returns:
         C: Reconstructed coefficients [N, number_of_attributes]
     """
-    
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
-    
     # Initialize reconstruction with transformed coefficients
     C = T.clone().to(device)
     Nlevels = len(Flags)
