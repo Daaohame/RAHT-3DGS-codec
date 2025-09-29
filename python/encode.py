@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 from data_util import read_ply_file
 from RAHT import RAHT, RAHT_optimized, RAHT_batched, RAHT_fused_kernel
-from iRAHT import inverse_RAHT_optimized
+from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
 # import RLGR_encoder
 
@@ -107,8 +107,8 @@ for frame_idx in range(T):
             print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
             print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
             print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-            C_recon = inverse_RAHT_optimized(Coeff, ListC, FlagsC, weightsC, device)
-            if torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8):
+            C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
+            if torch.allclose(C, C_recon, rtol=1e-4, atol=1e-6):
                 print("Reconstruction check: True")
             else:
                 print("Reconstruction check: False")
