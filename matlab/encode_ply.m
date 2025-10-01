@@ -29,7 +29,7 @@ end
 
 % List of PLY file paths
 ply_paths = {'/ssd1/haodongw/workspace/3dstream/3DGS_Compression_Adaptive_Voxelization/attributes_compressed/train_depth_15_thr_30_3DGS_adapt_lossless/train_dc.ply'};
-J = 15;
+J = 18;
 
 T = length(ply_paths);
 Nvox = zeros(T,1);
@@ -51,6 +51,9 @@ for frame =1:T
     
     [Coeff,w]=RAHT(C,ListC,FlagsC,weightsC);
     C_recon = iRAHT(Coeff, ListC, FlagsC, weightsC);
+
+    data = Coeff;
+    save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
 
     if ismembertol(C, C_recon, 1e-8)
         fprintf('Reconstruction check: PASSED (within tolerance)\n');

@@ -3,8 +3,8 @@ import numpy as np
 import time
 import os
 import glob
-from scipy.io import savemat
 import matplotlib.pyplot as plt
+from scipy.io import savemat
 
 from data_util import read_ply_file
 from RAHT import RAHT, RAHT_optimized, RAHT_batched, RAHT_fused_kernel
@@ -16,7 +16,7 @@ VARIANTS = {
     "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
     "RAHT_optimized":   lambda C,L,F,W,d: RAHT_optimized(C, L, F, W, d),
     "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
-    "RAHT_fused_kernel":lambda C,L,F,W,d: RAHT_fused_kernel(C, L, F, W, d),
+    # "RAHT_fused_kernel":lambda C,L,F,W,d: RAHT_fused_kernel(C, L, F, W, d),
 }
 
 DEBUG = True
@@ -33,6 +33,9 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
     rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
 
     return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
+
+def save_mat(tensor: torch.Tensor, filename: str) -> None:
+    savemat(filename, {"data": tensor.detach().cpu().numpy()})
 
 def rgb_to_yuv_torch(rgb_tensor):
     """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
@@ -100,6 +103,7 @@ for frame_idx in range(T):
         Coeff = out[0] if (isinstance(out, (tuple, list)) and len(out) == 2) else out
         timings[name] = t3 - t2
         coeffs_by_variant[name] = Coeff
+        save_mat(Coeff, f"../results/frame{frame}_coeff_python_{name}.mat")
         
         if DEBUG:
             print(f"Norm of C: {torch.norm(C)}")
@@ -164,17 +168,3 @@ for frame_idx in range(T):
 # plt.grid(True)
 # plt.legend()
 # plt.show()
-
-# # --- Saving ---
-# sequence_name = "test_sequence"
-# folder = f'RA-GFT/results/{sequence_name}/'
-# os.makedirs(folder, exist_ok=True)
-# filename = os.path.join(folder, f'{sequence_name}_RAHT.mat')
-# print(f"Saving results to {filename}...")
-# data_to_save = {
-#     'MSE': MSE.numpy(),
-#     'bytes': bytes_log.numpy(),
-#     'Nvox': Nvox.numpy(),
-#     'colorStep': np.array(colorStep)
-# }
-# savemat(filename, data_to_save)
