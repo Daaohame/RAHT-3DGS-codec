@@ -37,6 +37,12 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 def save_mat(tensor: torch.Tensor, filename: str) -> None:
     savemat(filename, {"data": tensor.detach().cpu().numpy()})
 
+def save_lists(filename, **kwargs):
+    out = {}
+    for key, tensor_list in kwargs.items():
+        out[key] = [t.detach().cpu().numpy() for t in tensor_list]
+    savemat(filename, out)
+
 def rgb_to_yuv_torch(rgb_tensor):
     """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
     rgb_tensor = rgb_tensor.float()
@@ -84,6 +90,7 @@ for frame_idx in range(T):
     ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
     t1 = time.time()
     raht_param_time = t1 - t0
+    save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
     
     ListC = [t.to(device) for t in ListC]
     FlagsC = [t.to(device) for t in FlagsC]

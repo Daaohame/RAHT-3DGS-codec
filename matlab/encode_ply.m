@@ -54,6 +54,7 @@ for frame =1:T
 
     data = Coeff;
     save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
+    save(sprintf('../results/frame%d_params_matlab.mat', frame), 'ListC', 'FlagsC', 'weightsC');
 
     if ismembertol(C, C_recon, 1e-8)
         fprintf('Reconstruction check: PASSED (within tolerance)\n');
