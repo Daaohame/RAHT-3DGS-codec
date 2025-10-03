@@ -63,13 +63,13 @@ if __name__ == "__main__":
     parser.add_argument("--atol", type=float, default=1e-8, help="Absolute tolerance (default: 1e-8)")
     args = parser.parse_args()
     
-    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_matlab.mat"
-    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
-    # fields=("data",)
+    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_matlab.mat"
+    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
+    fields=("data",)
     
-    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
-    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
-    fields=("ListC", "FlagsC", "weightsC")
+    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
+    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
+    # fields=("ListC", "FlagsC", "weightsC")
     
     # Priority: CLI args > hardcoded
     mat1_path = args.mat1 if args.mat1 is not None else HARDCODED_MAT1

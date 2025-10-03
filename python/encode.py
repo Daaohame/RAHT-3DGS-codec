@@ -4,7 +4,7 @@ import time
 import os
 import glob
 import matplotlib.pyplot as plt
-from scipy.io import savemat
+from scipy.io import savemat, loadmat
 
 from data_util import read_ply_file
 from RAHT import RAHT, RAHT_optimized, RAHT_batched, RAHT_fused_kernel
@@ -82,7 +82,6 @@ for frame_idx in range(T):
     V, Crgb = read_ply_file(ply_list[frame_idx])
     N = V.shape[0]
     Nvox[frame_idx] = N
-    # C = rgb_to_yuv_torch(Crgb)
     C = Crgb
     
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
@@ -92,9 +91,26 @@ for frame_idx in range(T):
     raht_param_time = t1 - t0
     save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
     
-    ListC = [t.to(device) for t in ListC]
-    FlagsC = [t.to(device) for t in FlagsC]
-    weightsC = [t.to(device) for t in weightsC]
+    saved_matlab_res = loadmat("../results/frame1_params_matlab.mat", simplify_cells=True)
+    ListC = saved_matlab_res["ListC"]
+    FlagsC = saved_matlab_res["FlagsC"]
+    weightsC = saved_matlab_res["weightsC"]
+    def to_tensor_list(seq, dtype, device):
+        out = []
+        for x in seq:
+            a = np.asarray(x)            # unwrap scalar/object to ndarray
+            a = np.squeeze(a)            # drop stray singleton dims
+            t = torch.as_tensor(a, dtype=dtype, device=device)
+            out.append(t)
+        return out
+    ListC    = to_tensor_list(ListC,    dtype=torch.int64,   device=device)
+    ListC    = [t - 1 for t in ListC]  # convert to 0-based indexing
+    FlagsC   = to_tensor_list(FlagsC,   dtype=torch.bool, device=device)
+    weightsC = to_tensor_list(weightsC, dtype=torch.int64,   device=device)
+    
+    # ListC = [t.to(device) for t in ListC]
+    # FlagsC = [t.to(device) for t in FlagsC]
+    # weightsC = [t.to(device) for t in weightsC]
     C = C.to(device)
     
     timings = {}
