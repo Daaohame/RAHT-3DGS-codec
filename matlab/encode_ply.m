@@ -29,7 +29,7 @@ end
 
 % List of PLY file paths
 ply_paths = {'/ssd1/haodongw/workspace/3dstream/3DGS_Compression_Adaptive_Voxelization/attributes_compressed/train_depth_15_thr_30_3DGS_adapt_lossless/train_dc.ply'};
-J = 18;
+J = 15;
 
 T = length(ply_paths);
 Nvox = zeros(T,1);
@@ -43,7 +43,7 @@ for frame =1:T
     Nvox(frame) = N;
 
     J_adj = raht_adjust_depth_increase_only(V, [0 0 0], 2^J, J);
-    
+
     % ListC: indices of colors
     % FlagsC: indicator of whether a node is a left sibling to another node
     % weightsC: weights of colors
@@ -55,9 +55,6 @@ for frame =1:T
     data = Coeff;
     save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
     save(sprintf('../results/frame%d_params_matlab.mat', frame), 'ListC', 'FlagsC', 'weightsC');
-    disp(cellfun(@class, ListC, 'UniformOutput', false));
-    disp(cellfun(@class, FlagsC, 'UniformOutput', false));
-    disp(cellfun(@class, weightsC, 'UniformOutput', false));
 
     if ismembertol(C, C_recon, 1e-8)
         fprintf('Reconstruction check: PASSED (within tolerance)\n');

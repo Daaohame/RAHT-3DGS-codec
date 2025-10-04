@@ -1,30 +1,29 @@
+"""
+RAHT Debug Script - Python Version
+Simple 8-point cube test for debugging RAHT transform
+"""
+
 import torch
 import numpy as np
 import time
-import os
-import glob
 from scipy.io import savemat
-import matplotlib.pyplot as plt
 
-from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
-from RAHT import RAHT_optimized
-from iRAHT import inverse_RAHT_optimized
+from RAHT import RAHT, RAHT_optimized, RAHT_batched
+from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
-# import RLGR_encoder
-
-DEBUG = True
 
 def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
     """
     Sanity check: max(T) == sqrt(N) * mean(C)
     T, C: 1D tensors of shape [N]
     """
-    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), "T and C must be 1D with same length"
+    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), \
+        "T and C must be 1D with same length"
     N = T.size(0)
-
+    
     lhs = T.max()
     rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
-
+    
     return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
 
 def rgb_to_yuv_torch(rgb_tensor):
@@ -40,120 +39,170 @@ def rgb_to_yuv_torch(rgb_tensor):
     yuv[:, 1:] += 128.0 # Add offset to U and V
     return yuv
 
-## ---------------------
-## Configuration
-## ---------------------
-data_root = '../matlab'
-dataset = '8iVFBv2'
-sequence = 'redandblack'
-T = get_pointcloud_n_frames(dataset, sequence)
-
+# Configuration
+DEBUG = True
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
-nSteps = len(colorStep)
-bytes_log = torch.zeros((T, nSteps))
-MSE = torch.zeros((T, nSteps))
-Nvox = torch.zeros(T)
-time_log = torch.zeros(T)
+print("=" * 60)
+print("RAHT DEBUG MODE - Python Version")
+print("=" * 60)
+print(f"Device: {device}")
+print("Testing with 8 corner points of unit cube")
+print()
 
-## ---------------------
-## Main Processing Loop
-## ---------------------
-print(f"\nStarting processing for {T} frames...")
+# Define 8 corner points of [0,1]×[0,1]×[0,1] cube
+V = torch.tensor([
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [0.0, 1.0, 1.0],
+    # [1.0, 1.0, 1.0]
+], dtype=torch.float32)
 
-for frame_idx in range(T):
-    frame = frame_idx + 1
-    frame_start = time.time()
+# All colors set to 1 (RGB)
+C = 255 * torch.ones((7, 3))
+C = rgb_to_yuv_torch(C)
+
+# Set depth J = 2 (for unit cube with 8 corners)
+J = 2
+
+print("Input Configuration:")
+print(f"  Number of points: {V.shape[0]}")
+print(f"  Octree depth J: {J}")
+print(f"  Points (V):")
+print(V)
+print(f"  Colors (C):")
+print(C)
+print()
+
+# Minimum corner and width
+origin = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+width = 2**J  # width = 4 (to accommodate [0,1] range with J=2)
+
+print("Processing parameters:")
+print(f"  origin: {origin.tolist()}")
+print(f"  width: {width}")
+print(f"  Voxel size Q: {width/2**J:.4f}")
+print()
+
+# Compute RAHT parameters
+print("Computing RAHT parameters...")
+t0 = time.time()
+ListC, FlagsC, weightsC = RAHT_param(V, origin, width, J)
+t1 = time.time()
+
+print(f"  RAHT_param time: {(t1-t0)*1000:.2f} ms")
+print(f"  Number of levels: {len(ListC)}")
+for level in range(len(ListC)):
+    print(f"    Level {level}: ListC size={len(ListC[level])}, "
+          f"FlagsC size={len(FlagsC[level])}, "
+          f"weightsC size={len(weightsC[level])}")
+print()
+
+# Move data to device
+ListC = [t.to(device) for t in ListC]
+FlagsC = [t.to(device) for t in FlagsC]
+weightsC = [t.to(device) for t in weightsC]
+C = C.to(device)
+
+# Test all RAHT variants
+VARIANTS = {
+    "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
+    "RAHT_optimized":   lambda C,L,F,W,d: RAHT_optimized(C, L, F, W, d),
+    "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
+}
+
+print("=" * 60)
+print("Testing RAHT Variants")
+print("=" * 60)
+
+for variant_name, raht_fn in VARIANTS.items():
+    print(f"\n--- {variant_name} ---")
     
-    V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
-    N = V.shape[0]
-    Nvox[frame_idx] = N
-    C = rgb_to_yuv_torch(Crgb)
-    
-    origin = torch.tensor([0, 0, 0], dtype=V.dtype)
-    t0 = time.time()
-    ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
-    t1 = time.time()
-    raht_param_time = t1 - t0
-    
-    ListC = [t.to(device) for t in ListC]
-    FlagsC = [t.to(device) for t in FlagsC]
-    weightsC = [t.to(device) for t in weightsC]
-    C = C.to(device)
-    
+    # Apply RAHT transform
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t2 = time.time()
-    Coeff, w = RAHT_optimized(C, ListC, FlagsC, weightsC)
+    
+    result = raht_fn(C, ListC, FlagsC, weightsC, device)
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t3 = time.time()
-    raht_optimized_time = t3 - t2
     
-    # Print timing information
-    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_optimized_time:.6f}s")
-
-    if DEBUG:
-        print(f"energy of C: {torch.norm(C)}")
-        print(f"energy of Coeff: {torch.norm(Coeff)}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT_optimized(Coeff, w, ListC, FlagsC, weightsC)
-        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
+    # Extract coefficient matrix
+    Coeff = result[0] if isinstance(result, (tuple, list)) and len(result) == 2 else result
     
-    # # Sort weights in descending order
-    # _, IX_ref = torch.sort(w, descending=True)
-    # Y = Coeff[:, 0]
+    transform_time = (t3 - t2) * 1000
+    print(f"  Transform time: {transform_time:.2f} ms")
+    print(f"  Coefficient matrix size: {Coeff.shape}")
+    print(f"  L2-norm of input C: {torch.norm(C).item():.6f}")
+    print(f"  L2-norm of Coeff: {torch.norm(Coeff).item():.6f}")
     
-    # # Loop through quantization steps
-    # for i in range(nSteps):
-    #     step = colorStep[i]
-    #     Coeff_enc = torch.round(Coeff / step)
-    #     Y_hat = Coeff_enc[:, 0] * step
-        
-    #     MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
-        
-    #     nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-    #     nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-    #     nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
-        
-    #     bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
-        
-    time_log[frame_idx] = time.time() - frame_start
-    print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
+    # Sanity checks
+    print(f"  Sanity check (channel 0): {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
+    print(f"  Sanity check (channel 1): {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
+    print(f"  Sanity check (channel 2): {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
+    
+    # Apply inverse RAHT
+    t4 = time.time()
+    C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
+    t5 = time.time()
+    
+    inverse_time = (t5 - t4) * 1000
+    print(f"  Inverse transform time: {inverse_time:.2f} ms")
+    
+    # Verify reconstruction
+    rtol, atol = 1e-4, 1e-6
+    if torch.allclose(C, C_recon, rtol=rtol, atol=atol):
+        print(f"  ✓ Reconstruction check: PASSED (rtol={rtol}, atol={atol})")
+    else:
+        print(f"  ✗ Reconstruction check: FAILED")
+    
+    # Compute reconstruction error
+    diff = C - C_recon
+    frobenius_error = torch.norm(diff, p='fro').item()
+    max_error = diff.abs().max().item()
+    mean_error = diff.abs().mean().item()
+    
+    print(f"  Frobenius norm error: {frobenius_error:.10e}")
+    print(f"  Max absolute error: {max_error:.10e}")
+    print(f"  Mean absolute error: {mean_error:.10e}")
+    
+    # Save results
+    savemat(f'../results/debug_{variant_name}_coeff.mat', 
+            {'Coeff': Coeff.detach().cpu().numpy()})
+    savemat(f'../results/debug_{variant_name}_recon.mat', 
+            {'C_recon': C_recon.detach().cpu().numpy(),
+             'frobenius_error': frobenius_error,
+             'max_error': max_error,
+             'mean_error': mean_error})
 
-# ## ---------------------
-# ## Analysis, Plotting, and Saving
-# ## ---------------------
-# print("Analyzing results...")
+# Save common parameters (once)
+params_dict = {
+    'ListC': [t.detach().cpu().numpy() for t in ListC],
+    'FlagsC': [t.detach().cpu().numpy() for t in FlagsC],
+    'weightsC': [t.detach().cpu().numpy() for t in weightsC]
+}
+savemat('../results/debug_params.mat', params_dict)
 
-# # Calculate PSNR from the mean MSE across all frames for each quantization step
-# psnr = -10 * torch.log10(torch.mean(MSE, dim=0))
+input_dict = {
+    'V': V.detach().cpu().numpy(),
+    'C': C.detach().cpu().numpy(),
+    'J': J
+}
+savemat('../results/debug_input.mat', input_dict)
 
-# # Calculate bits per voxel (bpv)
-# total_bytes_per_step = torch.sum(bytes_log, dim=0)
-# total_voxels = torch.sum(Nvox)
-# bpv = 8 * total_bytes_per_step / total_voxels
-
-# # --- Plotting ---
-# plt.figure(figsize=(8, 6))
-# plt.plot(bpv.numpy(), psnr.numpy(), 'b-x', label='O3D Load + RAHT Sim')
-# plt.xlabel('Bits per Voxel (bpv)')
-# plt.ylabel('Y-PSNR (dB)')
-# plt.title('Rate-Distortion Curve')
-# plt.grid(True)
-# plt.legend()
-# plt.show()
-
-# # --- Saving ---
-# sequence_name = "test_sequence"
-# folder = f'RA-GFT/results/{sequence_name}/'
-# os.makedirs(folder, exist_ok=True)
-# filename = os.path.join(folder, f'{sequence_name}_RAHT.mat')
-# print(f"Saving results to {filename}...")
-# data_to_save = {
-#     'MSE': MSE.numpy(),
-#     'bytes': bytes_log.numpy(),
-#     'Nvox': Nvox.numpy(),
-#     'colorStep': np.array(colorStep)
-# }
-# savemat(filename, data_to_save)
+print()
+print("=" * 60)
+print("Debug data saved to ../results/")
+print("Files:")
+print("  - debug_input.mat")
+print("  - debug_params.mat")
+for variant_name in VARIANTS.keys():
+    print(f"  - debug_{variant_name}_coeff.mat")
+    print(f"  - debug_{variant_name}_recon.mat")
+print("=" * 60)

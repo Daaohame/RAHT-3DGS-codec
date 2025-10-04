@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from scipy.io import savemat, loadmat
 
 from data_util import read_ply_file
-from RAHT import RAHT, RAHT_optimized, RAHT_batched, RAHT_fused_kernel
+from RAHT import RAHT, RAHT_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
 # import RLGR_encoder
@@ -16,7 +16,6 @@ VARIANTS = {
     "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
     "RAHT_optimized":   lambda C,L,F,W,d: RAHT_optimized(C, L, F, W, d),
     "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
-    # "RAHT_fused_kernel":lambda C,L,F,W,d: RAHT_fused_kernel(C, L, F, W, d),
 }
 
 DEBUG = True

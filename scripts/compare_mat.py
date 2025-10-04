@@ -53,6 +53,7 @@ def compare_matrices(path1, path2, fields=("data",), rtol=1e-5, atol=1e-8, equal
         print("Shape A:", A.shape)
         print("Shape B:", B.shape)
         print("Same shape:", A.shape == B.shape)
+        breakpoint()
         compare_arrays(A, B)
 
 if __name__ == "__main__":
@@ -63,9 +64,13 @@ if __name__ == "__main__":
     parser.add_argument("--atol", type=float, default=1e-8, help="Absolute tolerance (default: 1e-8)")
     args = parser.parse_args()
     
-    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_matlab.mat"
-    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
-    fields=("data",)
+    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_matlab.mat"
+    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
+    # fields=("data",)
+    
+    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_coeff.mat"
+    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_RAHT_coeff.mat"
+    fields=("Coeff",)
     
     # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
     # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
