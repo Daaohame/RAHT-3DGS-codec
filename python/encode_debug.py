@@ -6,11 +6,12 @@ Simple 8-point cube test for debugging RAHT transform
 import torch
 import numpy as np
 import time
-from scipy.io import savemat
+from scipy.io import savemat, loadmat
 
 from RAHT import RAHT, RAHT_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
+from voxelize import voxelize_pc
 
 def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
     """
@@ -47,40 +48,48 @@ print("=" * 60)
 print("RAHT DEBUG MODE - Python Version")
 print("=" * 60)
 print(f"Device: {device}")
-print("Testing with 8 corner points of unit cube")
-print()
 
-# Define 8 corner points of [0,1]×[0,1]×[0,1] cube
-V = torch.tensor([
-    [0.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0],
-    [1.0, 1.0, 0.0],
-    [0.0, 0.0, 1.0],
-    [1.0, 0.0, 1.0],
-    [0.0, 1.0, 1.0],
-    # [1.0, 1.0, 1.0]
-], dtype=torch.float32)
+# Generate sample colored point cloud
+N = 10000
+V = torch.rand(N, 3) * 10  # xyz in [0,10]
+C = torch.randint(0, 256, (N, 3), dtype=torch.float32)  # RGB attributes
+PC = torch.cat([V, C], dim=1)
 
-# All colors set to 1 (RGB)
-C = 255 * torch.ones((7, 3))
-C = rgb_to_yuv_torch(C)
+# Set voxelization parameters
+param = {
+    'vmin': [0, 0, 0],          # lower corner of bounding box
+    'width': 10,                 # cube side length
+    'J': 4,                      # octree depth -> 16^3 voxels
+    'writeFileOut': False,       # disable file output
+    'filename': 'example'        # base name if file writing enabled
+}
 
-# Set depth J = 2 (for unit cube with 8 corners)
-J = 2
+# Voxelize point cloud
+PCvox, PCsorted, voxel_indices, DeltaPC = voxelize_pc(PC, param)
+
+# Extract voxelized and sorted coordinates and attributes
+voxel_size = param['width'] / (2 ** param['J'])
+vmin_tensor = torch.tensor(param['vmin'], dtype=V.dtype, device=V.device)
+V0s = PCsorted[:, 0:3] - vmin_tensor  # sorted coordinates
+V0i = torch.floor(V0s / voxel_size)   # sorted voxel indices
+V = V0i[voxel_indices, :]             # Morton-ordered voxel coords
+Cvox = PCvox[:, 3:]                   # already Morton-ordered colors
+C = rgb_to_yuv_torch(Cvox)  # Convert to YUV color space
+
+J = param['J']
 
 print("Input Configuration:")
 print(f"  Number of points: {V.shape[0]}")
 print(f"  Octree depth J: {J}")
 print(f"  Points (V):")
-print(V)
+print(V.shape)
 print(f"  Colors (C):")
-print(C)
+print(C.shape)
 print()
 
 # Minimum corner and width
 origin = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
-width = 2**J  # width = 4 (to accommodate [0,1] range with J=2)
+width = 2**J
 
 print("Processing parameters:")
 print(f"  origin: {origin.tolist()}")
@@ -88,13 +97,31 @@ print(f"  width: {width}")
 print(f"  Voxel size Q: {width/2**J:.4f}")
 print()
 
-# Compute RAHT parameters
-print("Computing RAHT parameters...")
-t0 = time.time()
-ListC, FlagsC, weightsC = RAHT_param(V, origin, width, J)
-t1 = time.time()
+# Load RAHT parameters
+saved_params = loadmat("../results/debug_params.mat", simplify_cells=True)
+ListC = saved_params["ListC"]
+FlagsC = saved_params["FlagsC"]
+weightsC = saved_params["weightsC"]
+def to_tensor_list(seq, dtype, device):
+    out = []
+    for x in seq:
+        a = np.asarray(x)            # unwrap scalar/object to ndarray
+        a = np.squeeze(a)            # drop stray singleton dims
+        t = torch.as_tensor(a, dtype=dtype, device=device)
+        out.append(t)
+    return out
+ListC    = to_tensor_list(ListC,    dtype=torch.int64,   device=device)
+ListC    = [t - 1 for t in ListC]  # convert to 0-based indexing
+FlagsC   = to_tensor_list(FlagsC,   dtype=torch.bool, device=device)
+weightsC = to_tensor_list(weightsC, dtype=torch.int64,   device=device)
 
-print(f"  RAHT_param time: {(t1-t0)*1000:.2f} ms")
+# Load input data
+saved_input = loadmat("../results/debug_input.mat", simplify_cells=True)
+V = torch.as_tensor(saved_input["V"], dtype=torch.float32, device=device)
+C = torch.as_tensor(saved_input["C"], dtype=torch.float32, device=device)
+J = int(saved_input["J"])
+N = V.shape[0]
+
 print(f"  Number of levels: {len(ListC)}")
 for level in range(len(ListC)):
     print(f"    Level {level}: ListC size={len(ListC[level])}, "

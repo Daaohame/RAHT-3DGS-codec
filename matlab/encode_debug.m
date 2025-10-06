@@ -5,39 +5,48 @@ addpath(genpath('RA-GFT'));
 addpath(genpath('RAHT'));
 
 fprintf('=== RAHT DEBUG MODE ===\n');
-fprintf('Testing with 8 corner points of unit cube\n\n');
 
-% Define 8 corner points of [0,1]×[0,1]×[0,1] cube
-V = [
-    0, 0, 0;
-    1, 0, 0;
-    0, 1, 0;
-    1, 1, 0;
-    0, 0, 1;
-    1, 0, 1;
-    0, 1, 1;
-    % 1, 1, 1
-];
+% Generate sample colored point cloud
+N = 10000;
+V = rand(N,3) * 10;                  % xyz in [0,10]
+C = randi([0,255], N, 3);            % RGB attributes
+PC = [V, C];
 
-% All colors set to 255
-C = 255 * ones(7, 3);  % 8 points × 3 channels (RGB)
-C = RGBtoYUV(C); % Convert to YUV color space
+% Set voxelization parameters
+param.vmin = [0 0 0];                % lower corner of bounding box
+param.width = 10;                    % cube side length
+param.J = 4;                         % octree depth -> 16^3 voxels
+param.writeFileOut = false;          % disable file output
+param.filename = 'example';          % base name if file writing enabled
 
-% Set depth J = 2 (for unit cube with 8 corners)
-J = 2;
+% Voxelize point cloud
+[PCvox, PCsorted, voxel_indices, DeltaPC] = voxelizePC(PC, param);
+
+% Extract voxelized and sorted coordinates and attributes
+voxel_size = param.width/(2^param.J);
+V0s  = PCsorted(:,1:3) - param.vmin;    % sorted coordinates
+V0i  = floor(V0s/voxel_size);           % sorted voxel indices
+V = V0i(voxel_indices,:);               % Morton-ordered voxel coords
+Cvox = PCvox(:,4:end);                  % already Morton-ordered colors
+C = RGBtoYUV(Cvox); % Convert to YUV color space
+
+% [error, V_morton, index] = is_frame_morton_ordered(V, param.J);
+% disp(error);
+
+J = param.J;
 
 fprintf('Input Configuration:\n');
 fprintf('  Number of points: %d\n', size(V,1));
 fprintf('  Octree depth J: %d\n', J);
 fprintf('  Points (V):\n');
-disp(V);
+disp(size(V));
 fprintf('  Colors (C):\n');
-disp(C);
+disp(size(C));
 fprintf('\n');
 
 % Minimum corner and width
 minV = [0, 0, 0];
-width = 2^J;  % width = 4 (to accommodate [0,1] range with J=2)
+width = 2^J;
 
 fprintf('Processing parameters:\n');
 fprintf('  minV: [%.1f, %.1f, %.1f]\n', minV);
@@ -68,7 +77,7 @@ fprintf('Applying inverse RAHT...\n');
 C_recon = iRAHT(Coeff, ListC, FlagsC, weightsC);
 
 % Verify reconstruction
-tolerance = 1e-8;
+tolerance = 1e-10;
 if ismembertol(C, C_recon, tolerance)
     fprintf('✓ Reconstruction check: PASSED (within tolerance %.0e)\n', tolerance);
 else

@@ -52,8 +52,8 @@ for frame =1:T
     [Coeff,w]=RAHT(C,ListC,FlagsC,weightsC);
     C_recon = iRAHT(Coeff, ListC, FlagsC, weightsC);
 
-    data = Coeff;
-    save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
+    % Save for debug
+    save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'Coeff');
     save(sprintf('../results/frame%d_params_matlab.mat', frame), 'ListC', 'FlagsC', 'weightsC');
 
     if ismembertol(C, C_recon, 1e-8)
