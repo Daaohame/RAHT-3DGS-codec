@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
 from RAHT import RAHT_optimized
 from RAHT import RAHT2
-from iRAHT import inverse_RAHT_optimized
+from iRAHT import inverse_RAHT
 from RAHT_param2 import RAHT_param2
-# import RLGR_encoder
+import rlgr
 
 DEBUG = True
 
@@ -41,7 +41,6 @@ def rgb_to_yuv_torch(rgb_tensor):
     yuv[:, 1:] += 128.0 # Add offset to U and V
     return yuv
 
-
 def rgb_to_yuv_torch2(rgb_tensor):
     """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
     r, g, b = rgb_tensor[:, 0], rgb_tensor[:, 1], rgb_tensor[:, 2]
@@ -49,12 +48,13 @@ def rgb_to_yuv_torch2(rgb_tensor):
     U = torch.clamp(torch.round(-0.114572 * r - 0.385428 * g + 0.5 * b + 128.0), 0.0, 255.0)
     V = torch.clamp(torch.round(0.5 * r - 0.454153 * g - 0.045847 * b + 128.0), 0.0, 255.0)
     return torch.stack([Y, U, V], dim=1)
+
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = 'F:\Desktop\Motion_Vector_Database\data'
+data_root = '/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/matlab'
 dataset = '8iVFBv2'
-sequence = 'longdress'
+sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -106,26 +106,36 @@ for frame_idx in range(T):
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT_optimized(Coeff, w, ListC, FlagsC, weightsC)
+        C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
         print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
     
-    # # Sort weights in descending order
-    # _, IX_ref = torch.sort(w, descending=True)
-    # Y = Coeff[:, 0]
+    # Sort weights in descending order
+    _, IX_ref = torch.sort(w, descending=True)
+    Y = Coeff[:, 0]
     
-    # # Loop through quantization steps
-    # for i in range(nSteps):
-    #     step = colorStep[i]
-    #     Coeff_enc = torch.round(Coeff / step)
-    #     Y_hat = Coeff_enc[:, 0] * step
+    filename = 'test.bin'
+    
+    # Loop through quantization steps
+    for i in range(nSteps):
+        step = colorStep[i]
+        Coeff_enc = torch.round(Coeff / step)
+        Y_hat = Coeff_enc[:, 0] * step
         
-    #     MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
+        MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
         
-    #     nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-    #     nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-    #     nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
+        # nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
+        # nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
+        # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
+        # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
         
-    #     bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
+        enc = rlgr.file(filename, 1)
+        Y_list = [int(i) for i in Coeff_enc[IX_ref, 0].squeeze(1).tolist()]
+        U_list = [int(i) for i in Coeff_enc[IX_ref, 1].squeeze(1).tolist()]
+        V_list = [int(i) for i in Coeff_enc[IX_ref, 2].squeeze(1).tolist()]
+        enc.rlgrWrite(Y_list, 0)
+        enc.rlgrWrite(U_list, 0)
+        enc.rlgrWrite(V_list, 0)
+        enc.close()
         
     time_log[frame_idx] = time.time() - frame_start
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")

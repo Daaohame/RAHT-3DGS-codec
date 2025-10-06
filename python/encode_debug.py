@@ -183,7 +183,7 @@ for variant_name, raht_fn in VARIANTS.items():
     print(f"  Inverse transform time: {inverse_time:.2f} ms")
     
     # Verify reconstruction
-    rtol, atol = 1e-4, 1e-6
+    rtol, atol = 1e-4, 1e-10
     if torch.allclose(C, C_recon, rtol=rtol, atol=atol):
         print(f"  ✓ Reconstruction check: PASSED (rtol={rtol}, atol={atol})")
     else:

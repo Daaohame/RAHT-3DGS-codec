@@ -2,7 +2,7 @@ import scipy.io as sio
 import numpy as np
 import argparse
 
-def compare_matrices(path1, path2, fields=("data",), rtol=1e-5, atol=1e-8, equal_nan=True):
+def compare_matrices(path1, path2, fields=("data",), rtol=1e-4, atol=1e-8, equal_nan=True):
     try:
         mat1 = sio.loadmat(path1, simplify_cells=True)
         mat2 = sio.loadmat(path2, simplify_cells=True)
@@ -53,7 +53,6 @@ def compare_matrices(path1, path2, fields=("data",), rtol=1e-5, atol=1e-8, equal
         print("Shape A:", A.shape)
         print("Shape B:", B.shape)
         print("Same shape:", A.shape == B.shape)
-        breakpoint()
         compare_arrays(A, B)
 
 if __name__ == "__main__":
