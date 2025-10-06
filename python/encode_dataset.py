@@ -8,8 +8,9 @@ import matplotlib.pyplot as plt
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
 from RAHT import RAHT_optimized
+from RAHT import RAHT2
 from iRAHT import inverse_RAHT_optimized
-from RAHT_param import RAHT_param
+from RAHT_param2 import RAHT_param2
 # import RLGR_encoder
 
 DEBUG = True
@@ -43,9 +44,9 @@ def rgb_to_yuv_torch(rgb_tensor):
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = '../matlab'
+data_root = 'F:\Desktop\Motion_Vector_Database\data'
 dataset = '8iVFBv2'
-sequence = 'redandblack'
+sequence = 'longdress'
 T = get_pointcloud_n_frames(dataset, sequence)
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -73,7 +74,7 @@ for frame_idx in range(T):
     
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
     t0 = time.time()
-    ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
+    ListC, FlagsC, weightsC = RAHT_param2(V, origin, 2**J, J)
     t1 = time.time()
     raht_param_time = t1 - t0
     
@@ -83,7 +84,7 @@ for frame_idx in range(T):
     C = C.to(device)
     
     t2 = time.time()
-    Coeff, w = RAHT_optimized(C, ListC, FlagsC, weightsC)
+    Coeff, w = RAHT2(C, ListC, FlagsC, weightsC)
     t3 = time.time()
     raht_optimized_time = t3 - t2
     
