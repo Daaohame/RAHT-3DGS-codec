@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
 from RAHT import RAHT_optimized
 from RAHT import RAHT2
+from RAHT import rgb_to_yuv_torch2
 from iRAHT import inverse_RAHT
 from RAHT_param2 import RAHT_param2
 import rlgr
@@ -27,27 +28,6 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
     rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
 
     return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
-
-def rgb_to_yuv_torch(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    rgb_tensor = rgb_tensor.float()
-    conversion_matrix = torch.torch.tensor([
-        [0.2126, 0.7152, 0.0722],
-        [-0.1146, -0.3854, 0.5000],
-        [0.5000, -0.4542, -0.0458]
-    ]).to(rgb_tensor.device)
-    
-    yuv = torch.matmul(rgb_tensor, conversion_matrix.T)
-    yuv[:, 1:] += 128.0 # Add offset to U and V
-    return yuv
-
-def rgb_to_yuv_torch2(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    r, g, b = rgb_tensor[:, 0], rgb_tensor[:, 1], rgb_tensor[:, 2]
-    Y = torch.clamp(torch.round(0.212600 * r + 0.715200 * g + 0.072200 * b), 0.0, 255.0)
-    U = torch.clamp(torch.round(-0.114572 * r - 0.385428 * g + 0.5 * b + 128.0), 0.0, 255.0)
-    V = torch.clamp(torch.round(0.5 * r - 0.454153 * g - 0.045847 * b + 128.0), 0.0, 255.0)
-    return torch.stack([Y, U, V], dim=1)
 
 ## ---------------------
 ## Configuration
@@ -112,7 +92,8 @@ for frame_idx in range(T):
     # Sort weights in descending order
     _, IX_ref = torch.sort(w, descending=True)
     Y = Coeff[:, 0]
-    
+
+    # temporary: filename for PyRLGR
     filename = 'test.bin'
     
     # Loop through quantization steps
