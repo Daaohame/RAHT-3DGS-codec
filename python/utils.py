@@ -1,3 +1,6 @@
+import torch
+from scipy.io import savemat, loadmat
+
 def rgb_to_yuv_torch(rgb_tensor):
     """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
     rgb_tensor = rgb_tensor.float()
@@ -18,3 +21,13 @@ def rgb_to_yuv_torch2(rgb_tensor):
     U = torch.clamp(torch.round(-0.114572 * r - 0.385428 * g + 0.5 * b + 128.0), 0.0, 255.0)
     V = torch.clamp(torch.round(0.5 * r - 0.454153 * g - 0.045847 * b + 128.0), 0.0, 255.0)
     return torch.stack([Y, U, V], dim=1)
+
+
+def save_mat(tensor: torch.Tensor, filename: str) -> None:
+    savemat(filename, {"data": tensor.detach().cpu().numpy()})
+
+def save_lists(filename, **kwargs):
+    out = {}
+    for key, tensor_list in kwargs.items():
+        out[key] = [t.detach().cpu().numpy() for t in tensor_list]
+    savemat(filename, out)

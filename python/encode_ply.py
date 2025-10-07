@@ -4,13 +4,14 @@ import time
 import os
 import glob
 import matplotlib.pyplot as plt
-from scipy.io import savemat, loadmat
+from scipy.io import loadmat
 
 from data_util import read_ply_file
+from utils import save_mat, save_lists
 from RAHT import RAHT, RAHT_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param
-# import RLGR_encoder
+from RAHT_param import RAHT_param2 as RAHT_param
+import rlgr
 
 VARIANTS = {
     "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
@@ -33,27 +34,6 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 
     return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
 
-def save_mat(tensor: torch.Tensor, filename: str) -> None:
-    savemat(filename, {"data": tensor.detach().cpu().numpy()})
-
-def save_lists(filename, **kwargs):
-    out = {}
-    for key, tensor_list in kwargs.items():
-        out[key] = [t.detach().cpu().numpy() for t in tensor_list]
-    savemat(filename, out)
-
-def rgb_to_yuv_torch(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    rgb_tensor = rgb_tensor.float()
-    conversion_matrix = torch.tensor([
-        [0.2126, 0.7152, 0.0722],
-        [-0.1146, -0.3854, 0.5000],
-        [0.5000, -0.4542, -0.0458]
-    ]).to(rgb_tensor.device)
-    
-    yuv = torch.matmul(rgb_tensor, conversion_matrix.T)
-    yuv[:, 1:] += 128.0 # Add offset to U and V
-    return yuv
 
 ## ---------------------
 ## Configuration
@@ -90,26 +70,26 @@ for frame_idx in range(T):
     raht_param_time = t1 - t0
     save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
     
-    saved_matlab_res = loadmat("../results/frame1_params_matlab.mat", simplify_cells=True)
-    ListC = saved_matlab_res["ListC"]
-    FlagsC = saved_matlab_res["FlagsC"]
-    weightsC = saved_matlab_res["weightsC"]
-    def to_tensor_list(seq, dtype, device):
-        out = []
-        for x in seq:
-            a = np.asarray(x)            # unwrap scalar/object to ndarray
-            a = np.squeeze(a)            # drop stray singleton dims
-            t = torch.as_tensor(a, dtype=dtype, device=device)
-            out.append(t)
-        return out
-    ListC    = to_tensor_list(ListC,    dtype=torch.int64,   device=device)
-    ListC    = [t - 1 for t in ListC]  # convert to 0-based indexing
-    FlagsC   = to_tensor_list(FlagsC,   dtype=torch.bool, device=device)
-    weightsC = to_tensor_list(weightsC, dtype=torch.int64,   device=device)
+    # saved_matlab_res = loadmat("../results/frame1_params_matlab.mat", simplify_cells=True)
+    # ListC = saved_matlab_res["ListC"]
+    # FlagsC = saved_matlab_res["FlagsC"]
+    # weightsC = saved_matlab_res["weightsC"]
+    # def to_tensor_list(seq, dtype, device):
+    #     out = []
+    #     for x in seq:
+    #         a = np.asarray(x)            # unwrap scalar/object to ndarray
+    #         a = np.squeeze(a)            # drop stray singleton dims
+    #         t = torch.as_tensor(a, dtype=dtype, device=device)
+    #         out.append(t)
+    #     return out
+    # ListC    = to_tensor_list(ListC,    dtype=torch.int64,   device=device)
+    # ListC    = [t - 1 for t in ListC]  # convert to 0-based indexing
+    # FlagsC   = to_tensor_list(FlagsC,   dtype=torch.bool, device=device)
+    # weightsC = to_tensor_list(weightsC, dtype=torch.int64,   device=device)
     
-    # ListC = [t.to(device) for t in ListC]
-    # FlagsC = [t.to(device) for t in FlagsC]
-    # weightsC = [t.to(device) for t in weightsC]
+    ListC = [t.to(device) for t in ListC]
+    FlagsC = [t.to(device) for t in FlagsC]
+    weightsC = [t.to(device) for t in weightsC]
     C = C.to(device)
     
     timings = {}
@@ -118,11 +98,10 @@ for frame_idx in range(T):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t2 = time.time()
-        out = fn(C, ListC, FlagsC, weightsC, device)
+        Coeff, w = fn(C, ListC, FlagsC, weightsC, device)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t3 = time.time()
-        Coeff = out[0] if (isinstance(out, (tuple, list)) and len(out) == 2) else out
         timings[name] = t3 - t2
         coeffs_by_variant[name] = Coeff
         save_mat(Coeff, f"../results/frame{frame}_coeff_python_{name}.mat")
@@ -141,6 +120,34 @@ for frame_idx in range(T):
                 diff = C - C_recon
                 print("Max difference:", diff.abs().max().item())
                 print("Mean difference:", diff.abs().mean().item())
+        
+        # Sort weights in descending order
+        _, IX_ref = torch.sort(w, descending=True)
+        Y = Coeff[:, 0]
+        
+        # temporary: filename for PyRLGR
+        filename = 'test.bin'
+        
+        for i in range(nSteps):
+            step = colorStep[i]
+            Coeff_enc = torch.round(Coeff / step)
+            Y_hat = Coeff_enc[:, 0] * step
+            
+            MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
+            
+            # nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
+            # nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
+            # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
+            # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
+            
+            enc = rlgr.file(filename, 1)
+            Y_list = [int(i) for i in Coeff_enc[IX_ref, 0].squeeze(1).tolist()]
+            U_list = [int(i) for i in Coeff_enc[IX_ref, 1].squeeze(1).tolist()]
+            V_list = [int(i) for i in Coeff_enc[IX_ref, 2].squeeze(1).tolist()]
+            enc.rlgrWrite(Y_list, 0)
+            enc.rlgrWrite(U_list, 0)
+            enc.rlgrWrite(V_list, 0)
+            enc.close()
 
     # Print timing info
     print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s")

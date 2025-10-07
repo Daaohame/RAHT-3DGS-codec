@@ -7,11 +7,10 @@ from scipy.io import savemat
 import matplotlib.pyplot as plt
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
-from RAHT import RAHT_optimized
-from RAHT import RAHT2
-from RAHT import rgb_to_yuv_torch2
+from utils import rgb_to_yuv_torch2, save_mat, save_lists
+from RAHT import RAHT2, RAHT_optimized
 from iRAHT import inverse_RAHT
-from RAHT_param2 import RAHT_param2
+from RAHT_param import RAHT_param2
 import rlgr
 
 DEBUG = True
@@ -36,6 +35,7 @@ data_root = '/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/matlab'
 dataset = '8iVFBv2'
 sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
+T = 1
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -58,6 +58,7 @@ for frame_idx in range(T):
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
+    Crgb = Crgb.to(torch.float64).to(device)
     C = rgb_to_yuv_torch2(Crgb)
     
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
@@ -69,20 +70,21 @@ for frame_idx in range(T):
     ListC = [t.to(device) for t in ListC]
     FlagsC = [t.to(device) for t in FlagsC]
     weightsC = [t.to(device) for t in weightsC]
-    C = C.to(device)
     
     t2 = time.time()
     Coeff, w = RAHT2(C, ListC, FlagsC, weightsC)
     t3 = time.time()
-    raht_optimized_time = t3 - t2
+    raht_transform_time = t3 - t2
     
     # Print timing information
     print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_optimized_time:.6f}s")
+          f"RAHT_optimized={raht_transform_time:.6f}s")
 
     if DEBUG:
-        print(f"energy of C: {torch.norm(C)}")
-        print(f"energy of Coeff: {torch.norm(Coeff)}")
+        save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
+        save_mat(Coeff, f"../results/frame{frame}_coeff_python.mat")
+        print(f"Norm of C: {torch.norm(C)}")
+        print(f"Norm of Coeff: {torch.norm(Coeff)}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")

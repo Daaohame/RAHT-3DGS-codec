@@ -67,13 +67,13 @@ if __name__ == "__main__":
     # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
     # fields=("data",)
     
-    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_coeff.mat"
-    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_RAHT_coeff.mat"
-    fields=("Coeff",)
+    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_coeff.mat"
+    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_RAHT_coeff.mat"
+    # fields=("Coeff",)
     
-    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
-    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
-    # fields=("ListC", "FlagsC", "weightsC")
+    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
+    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
+    fields=("ListC", "FlagsC", "weightsC")
     
     # Priority: CLI args > hardcoded
     mat1_path = args.mat1 if args.mat1 is not None else HARDCODED_MAT1
