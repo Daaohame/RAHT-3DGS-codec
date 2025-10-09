@@ -5,12 +5,14 @@ import os
 import glob
 from scipy.io import savemat
 import matplotlib.pyplot as plt
+from scipy.io import loadmat
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
 from utils import rgb_to_yuv_torch2, save_mat, save_lists
-from RAHT import RAHT2, RAHT_optimized
+from RAHT import RAHT2, RAHT_optimized, RAHT2_optimized
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param2
+from crosscheck import compare_lists,load_raht_param_from_mat,compare_raht_param,load_raht_out_mat,compare_RAHT_outputs
 import rlgr
 
 DEBUG = True
@@ -66,13 +68,29 @@ for frame_idx in range(T):
     ListC, FlagsC, weightsC = RAHT_param2(V, origin, 2**J, J)
     t1 = time.time()
     raht_param_time = t1 - t0
-    
+
+    # L_ref, F_ref, W_ref = load_raht_param_from_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_param.mat",
+    #                                                device='cpu', one_based=True)
+    # L_py, F_py, W_py = ListC, FlagsC, weightsC
+
+    # 若 Python 是 0-based、MATLAB 是 1-based：先统一
+    # if L_py and L_py[0].numel() > 0 and L_py[0].min().item() == 0:
+    #     L_py = [t + 1 for t in L_py]  # 统一为 1-based 再比较
+
+    # okL = compare_lists(L_ref, L_py, "ListC")
+    # okF = compare_lists(F_ref, F_py, "FlagsC")  # 布尔整等比较
+    # okW = compare_lists(W_ref, W_py, "weightsC")  # 整型整等比较
+    # all_ok = okL and okF and okW
+
     ListC = [t.to(device) for t in ListC]
     FlagsC = [t.to(device) for t in FlagsC]
     weightsC = [t.to(device) for t in weightsC]
     
     t2 = time.time()
-    Coeff, w = RAHT2(C, ListC, FlagsC, weightsC)
+    Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
+    # Coeff_m, w_m = load_raht_out_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_out.mat", device='cpu')
+    # compare_RAHT_outputs(Coeff_m, w_m, Coeff, w, rtol=1e-12, atol=1e-12)
+
     t3 = time.time()
     raht_transform_time = t3 - t2
     
