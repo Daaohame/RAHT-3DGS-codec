@@ -410,15 +410,16 @@ def RAHT2(C,
     """
     device = C.device
     N, D = C.shape
-    T = C.clone()
-    w = torch.ones((N, 1), dtype=torch.int64, device=device)
+    T = C.to(torch.float64)
+    w = torch.ones((N, 1), dtype=torch.float64, device=device)
 
     def to0(idx: torch.Tensor) -> torch.Tensor:
         return idx - 1 if one_based else idx
 
     Nlevels = len(Flags)
     # MATLAB: for j = 1:Nlevels-3  (1-based). Python 0-based: range(Nlevels-3)
-    for j in range(Nlevels - 3):
+    for j in range(Nlevels):
+    # for j in range(1):
         # sibling masks at this level
         left_mask  = Flags[j]                              # (len(List[j]),)
         right_mask = torch.cat([torch.tensor([False], device=device),
@@ -443,10 +444,96 @@ def RAHT2(C,
         w1 = weights[j][right_mask].to(torch.float64)      # (M,)
         denom = w0 + w1
         # numerical safety（不期望出现0，但以防万一）
-        denom = torch.clamp(denom, min=1e-12)
+        # denom = torch.clamp(denom, min=1e-12)
 
-        a = torch.sqrt(w0 / denom).unsqueeze(1).to(T.dtype)  # (M,1)
-        b = torch.sqrt(w1 / denom).unsqueeze(1).to(T.dtype)  # (M,1)
+        a = torch.sqrt(w0 / denom).unsqueeze(1)  # (M,1)
+        b = torch.sqrt(w1 / denom).unsqueeze(1)  # (M,1)
+
+        # update node weights (MATLAB: w(i0)=w(i0)+w(i1); w(i1)=w(i0))
+        new_w0 = w.index_select(0, i0_) + w.index_select(0, i1_)  # (M,1)
+        new_w1 = new_w0.clone()
+        w.scatter_(0, i0_.unsqueeze(1), new_w0)
+        w.scatter_(0, i1_.unsqueeze(1), new_w1)
+
+        # 2x2 RAHT butterfly
+        T_i0 = a * x0 + b * x1
+        T_i1 = -b * x0 + a * x1
+        T.scatter_(0, i0_.unsqueeze(1).expand(-1, D), T_i0)
+        T.scatter_(0, i1_.unsqueeze(1).expand(-1, D), T_i1)
+
+    return T, w
+
+@torch.no_grad()
+def RAHT2_optimized(C,
+               List,
+               Flags,
+               weights,
+               one_based: bool = False):
+    """
+    PyTorch version of:
+        function [T,w] = RAHT(C,List,Flags,weights)
+
+    Parameters
+    ----------
+    C : (N, D) float tensor
+        Input attributes (rows correspond to points in Morton order).
+    List : list[LongTensor]
+        From RAHT_param_torch; List[j] are group start indices at level j.
+    Flags : list[BoolTensor]
+        Flags[j][k]==True iff k and k+1 share the same MSB prefix at level j.
+        Last element padded False (same as MATLAB).
+    weights : list[LongTensor]
+        Run-length weights per level (length of each group).
+    one_based : bool
+        If True, `List` entries are 1-based and will be converted to 0-based for tensor indexing.
+
+    Returns
+    -------
+    T : (N, D) float tensor
+        Transformed coefficients.
+    w : (N, 1)  long tensor
+        Aggregated node weights after combining siblings.
+    """
+    device = C.device
+    N, D = C.shape
+    T = C.to(torch.float64).to(device)
+    w = torch.ones((N, 1), dtype=torch.float64, device=device)
+
+    def to0(idx: torch.Tensor) -> torch.Tensor:
+        return idx - 1 if one_based else idx
+
+    Nlevels = len(Flags)
+    # MATLAB: for j = 1:Nlevels-3  (1-based). Python 0-based: range(Nlevels-3)
+    for j in range(Nlevels):
+    # for j in range(1):
+        # sibling masks at this level
+        left_mask  = Flags[j]                              # (len(List[j]),)
+        right_mask = torch.cat([torch.tensor([False], device=device),
+                                Flags[j][:-1]])            # [0; Flags(1:end-1)]
+
+        # indices of left and right siblings (in the global order)
+        i0 = List[j][left_mask]                            # starts that HAVE right siblings
+        i1 = List[j][right_mask]                           # their right siblings
+
+        if i0.numel() == 0:                                # nothing to do at this level
+            continue
+
+        i0_ = to0(i0).long()
+        i1_ = to0(i1).long()
+
+        # pick coefficients
+        x0 = T.index_select(0, i0_)                        # (M,D)
+        x1 = T.index_select(0, i1_)                        # (M,D)
+
+        # pick transform weights for this level (run-lengths)
+        w0 = weights[j][left_mask].to(torch.float64)       # (M,)
+        w1 = weights[j][right_mask].to(torch.float64)      # (M,)
+        denom = w0 + w1
+        # numerical safety（不期望出现0，但以防万一）
+        # denom = torch.clamp(denom, min=1e-12)
+
+        a = torch.sqrt(w0 / denom).unsqueeze(1)  # (M,1)
+        b = torch.sqrt(w1 / denom).unsqueeze(1)  # (M,1)
 
         # update node weights (MATLAB: w(i0)=w(i0)+w(i1); w(i1)=w(i0))
         new_w0 = w.index_select(0, i0_) + w.index_select(0, i1_)  # (M,1)
