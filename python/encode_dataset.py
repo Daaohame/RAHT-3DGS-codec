@@ -92,6 +92,9 @@ for frame_idx in range(T):
     # Coeff_m, w_m = load_raht_out_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_out.mat", device='cpu')
     # compare_RAHT_outputs(Coeff_m, w_m, Coeff, w, rtol=1e-12, atol=1e-12)
 
+    t3 = time.time()
+    raht_transform_time = t3 - t2
+
     error, V, index = is_frame_morton_ordered(V, J)
     ac_list = []
     dc_list = []
@@ -110,12 +113,8 @@ for frame_idx in range(T):
     ac_list = ac_list[::-1]
     order_RAGFT = torch.cat(ac_list)
 
-    t3 = time.time()
-    raht_transform_time = t3 - t2
-
-    # Print timing information
-    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_transform_time:.6f}s")
+    t4 = time.time()
+    raht_reorder_RAGFT_time = t4 - t3
 
     if DEBUG:
         save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
@@ -129,8 +128,21 @@ for frame_idx in range(T):
         print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
 
     # Sort weights in descending order
+
     values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
+    t5 = time.time()
+    raht_reorder_RAHT_time = t5 - t4
+
     order_morton = torch.arange(0,V.shape[0])
+    t6 = time.time()
+    raht_reorder_morton_time = t6 - t5
+
+    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
+          f"RAHT_optimized={raht_transform_time:.6f}s, "
+          f"RAHT_reorder_RAGFT={raht_reorder_RAGFT_time:.6f}s, "
+          f"RAHT_reorder_RAHT={raht_reorder_RAHT_time:.6f}s, "
+          f"RAHT_reorder_morton={raht_reorder_morton_time:.6f}s")
+
     Y = Coeff[:, 0]
 
     # temporary: filename for PyRLGR
