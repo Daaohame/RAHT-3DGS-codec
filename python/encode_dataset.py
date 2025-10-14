@@ -8,15 +8,14 @@ import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
-from RAHT import RAHT_optimized
-from RAHT import RAHT2,RAHT2_optimized
-from iRAHT import inverse_RAHT_optimized
-from RAHT_param2 import RAHT_param2
-from RAHT_param import RAHT_param
+from utils import rgb_to_yuv_torch2, save_mat, save_lists
+from RAHT import RAHT2, RAHT_optimized, RAHT2_optimized,is_frame_morton_ordered,block_indices
+from iRAHT import inverse_RAHT
+from RAHT_param import RAHT_param2
 from crosscheck import compare_lists,load_raht_param_from_mat,compare_raht_param,load_raht_out_mat,compare_RAHT_outputs
-# import RLGR_encoder
+import rlgr
 
-DEBUG = True
+DEBUG = False
 
 def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
     """
@@ -31,38 +30,19 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 
     return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
 
-def rgb_to_yuv_torch(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    rgb_tensor = rgb_tensor.float()
-    conversion_matrix = torch.torch.tensor([
-        [0.2126, 0.7152, 0.0722],
-        [-0.1146, -0.3854, 0.5000],
-        [0.5000, -0.4542, -0.0458]
-    ]).to(rgb_tensor.device)
-    
-    yuv = torch.matmul(rgb_tensor, conversion_matrix.T)
-    yuv[:, 1:] += 128.0 # Add offset to U and V
-    return yuv
-
-
-def rgb_to_yuv_torch2(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    r, g, b = rgb_tensor[:, 0], rgb_tensor[:, 1], rgb_tensor[:, 2]
-    Y = torch.clamp(torch.floor(0.212600 * r + 0.715200 * g + 0.072200 * b + 0.5), 0.0, 255.0)
-    U = torch.clamp(torch.floor(-0.114572 * r - 0.385428 * g + 0.5 * b + 128.0 + 0.5), 0.0, 255.0)
-    V = torch.clamp(torch.floor(0.5 * r - 0.454153 * g - 0.045847 * b + 128.0 + 0.5), 0.0, 255.0)
-    return torch.stack([Y, U, V], dim=1)
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = 'F:\Desktop\Motion_Vector_Database\data'
+data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
 dataset = '8iVFBv2'
-sequence = 'longdress'
+sequence = 'soldier'
 T = get_pointcloud_n_frames(dataset, sequence)
+T = 1
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
+# colorStep = [1]
 nSteps = len(colorStep)
 bytes_log = torch.zeros((T, nSteps))
 MSE = torch.zeros((T, nSteps))
@@ -77,11 +57,12 @@ print(f"\nStarting processing for {T} frames...")
 for frame_idx in range(T):
     frame = frame_idx + 1
     frame_start = time.time()
-    
+
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
-    C = rgb_to_yuv_torch2(Crgb.to(torch.float64))
+    Crgb = Crgb.to(torch.float64).to(device)
+    C = rgb_to_yuv_torch2(Crgb)
 
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
     t0 = time.time()
@@ -105,49 +86,92 @@ for frame_idx in range(T):
     ListC = [t.to(device) for t in ListC]
     FlagsC = [t.to(device) for t in FlagsC]
     weightsC = [t.to(device) for t in weightsC]
-    C = C.to(device)
-    
+
     t2 = time.time()
     Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
     # Coeff_m, w_m = load_raht_out_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_out.mat", device='cpu')
     # compare_RAHT_outputs(Coeff_m, w_m, Coeff, w, rtol=1e-12, atol=1e-12)
 
+    error, V, index = is_frame_morton_ordered(V, J)
+    ac_list = []
+    dc_list = []
+    indices = torch.arange(0, N)
+    for i in range(J):
+        indices,indices_remain = block_indices(V[indices,:], 2**(i+1))
+        if i == 0:
+            ac_list.append(indices_remain)
+            dc_list.append(indices)
+        else:
+            indices = dc_list[i-1][indices]
+            indices_remain = dc_list[i-1][indices_remain]
+            ac_list.append(indices_remain)
+            dc_list.append(indices)
+    ac_list.append(indices)
+    ac_list = ac_list[::-1]
+    order_RAGFT = torch.cat(ac_list)
+
     t3 = time.time()
-    raht_optimized_time = t3 - t2
-    
+    raht_transform_time = t3 - t2
+
     # Print timing information
     print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_optimized_time:.6f}s")
+          f"RAHT_optimized={raht_transform_time:.6f}s")
 
     if DEBUG:
-        print(f"energy of C: {torch.norm(C)}")
-        print(f"energy of Coeff: {torch.norm(Coeff)}")
+        save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
+        save_mat(Coeff, f"../results/frame{frame}_coeff_python.mat")
+        print(f"Norm of C: {torch.norm(C)}")
+        print(f"Norm of Coeff: {torch.norm(Coeff)}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT_optimized(Coeff, w, ListC, FlagsC, weightsC)
+        C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
         print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
-    
-    # # Sort weights in descending order
-    # _, IX_ref = torch.sort(w, descending=True)
-    # Y = Coeff[:, 0]
-    
-    # # Loop through quantization steps
-    # for i in range(nSteps):
-    #     step = colorStep[i]
-    #     Coeff_enc = torch.round(Coeff / step)
-    #     Y_hat = Coeff_enc[:, 0] * step
-        
-    #     MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
-        
-    #     nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-    #     nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-    #     nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
-        
-    #     bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
-        
+
+    # Sort weights in descending order
+    values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
+    order_morton = torch.arange(0,V.shape[0])
+    Y = Coeff[:, 0]
+
+    # temporary: filename for PyRLGR
+    filename = 'test.bin'
+    rates = []
+    # Loop through quantization steps
+    for i in range(nSteps):
+        step = colorStep[i]
+        Coeff_enc = torch.floor(Coeff / step + 0.5)
+        Y_hat = Coeff_enc[:, 0] * step
+
+        MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
+
+        # nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
+        # nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
+        # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
+        # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
+
+        enc = rlgr.file(filename, 1)
+        Y_list = [int(i) for i in Coeff_enc[order_RAHT, 0].tolist()] #order_RAHT order_RAGFT order_morton
+        U_list = [int(i) for i in Coeff_enc[order_RAHT, 1].tolist()]
+        V_list = [int(i) for i in Coeff_enc[order_RAHT, 2].tolist()]
+        Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
+        enc.rlgrWrite(Y_list, int(1))
+        enc.rlgrWrite(U_list, int(1))
+        enc.rlgrWrite(V_list, int(1))
+        enc.close()
+        size_bytes = os.path.getsize(filename)
+        rates.append(size_bytes*8/N)
+
+        dec = rlgr.file(filename, 0)
+        Y_list_dec = dec.rlgrRead(N, 1)
+        U_list_dec = dec.rlgrRead(N, 1)
+        V_list_dec = dec.rlgrRead(N, 1)
+        dec.close()
+
+        # rates.append(size_bytes)
+
     time_log[frame_idx] = time.time() - frame_start
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
+    print("\t".join(map(str, rates)))
 
 # ## ---------------------
 # ## Analysis, Plotting, and Saving
