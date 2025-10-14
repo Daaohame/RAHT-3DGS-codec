@@ -17,27 +17,13 @@ import rlgr
 
 DEBUG = False
 
-def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
-    """
-    Sanity check: max(T) == sqrt(N) * mean(C)
-    T, C: 1D tensors of shape [N]
-    """
-    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), "T and C must be 1D with same length"
-    N = T.size(0)
-
-    lhs = T.max()
-    rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
-
-    return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
 
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
-dataset = '8iVFBv2'
-sequence = 'soldier'
-T = get_pointcloud_n_frames(dataset, sequence)
-T = 1
+ply_list = ['C:\\Users\\hhrho\\Downloads\\train_dc.ply']
+J = 18
+T = len(ply_list)
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -58,7 +44,7 @@ for frame_idx in range(T):
     frame = frame_idx + 1
     frame_start = time.time()
 
-    V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
+    V, Crgb = read_ply_file(ply_list[frame_idx])
     N = V.shape[0]
     Nvox[frame_idx] = N
     Crgb = Crgb.to(torch.float64).to(device)
@@ -115,18 +101,6 @@ for frame_idx in range(T):
 
     t4 = time.time()
     raht_reorder_RAGFT_time = t4 - t3
-
-    if DEBUG:
-        save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
-        save_mat(Coeff, f"../results/frame{frame}_coeff_python.mat")
-        print(f"Norm of C: {torch.norm(C)}")
-        print(f"Norm of Coeff: {torch.norm(Coeff)}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
-        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
-
     # Sort weights in descending order
 
     values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
@@ -185,39 +159,3 @@ for frame_idx in range(T):
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
     print("\t".join(map(str, rates)))
 
-# ## ---------------------
-# ## Analysis, Plotting, and Saving
-# ## ---------------------
-# print("Analyzing results...")
-
-# # Calculate PSNR from the mean MSE across all frames for each quantization step
-# psnr = -10 * torch.log10(torch.mean(MSE, dim=0))
-
-# # Calculate bits per voxel (bpv)
-# total_bytes_per_step = torch.sum(bytes_log, dim=0)
-# total_voxels = torch.sum(Nvox)
-# bpv = 8 * total_bytes_per_step / total_voxels
-
-# # --- Plotting ---
-# plt.figure(figsize=(8, 6))
-# plt.plot(bpv.numpy(), psnr.numpy(), 'b-x', label='O3D Load + RAHT Sim')
-# plt.xlabel('Bits per Voxel (bpv)')
-# plt.ylabel('Y-PSNR (dB)')
-# plt.title('Rate-Distortion Curve')
-# plt.grid(True)
-# plt.legend()
-# plt.show()
-
-# # --- Saving ---
-# sequence_name = "test_sequence"
-# folder = f'RA-GFT/results/{sequence_name}/'
-# os.makedirs(folder, exist_ok=True)
-# filename = os.path.join(folder, f'{sequence_name}_RAHT.mat')
-# print(f"Saving results to {filename}...")
-# data_to_save = {
-#     'MSE': MSE.numpy(),
-#     'bytes': bytes_log.numpy(),
-#     'Nvox': Nvox.numpy(),
-#     'colorStep': np.array(colorStep)
-# }
-# savemat(filename, data_to_save)

@@ -58,7 +58,7 @@ def rgb_to_yuv_torch(rgb_tensor):
 ## ---------------------
 ## Configuration
 ## ---------------------
-ply_list = ['/ssd1/haodongw/workspace/3dstream/3DGS_Compression_Adaptive_Voxelization/attributes_compressed/train_depth_15_thr_30_3DGS_adapt_lossless/train_dc.ply']
+ply_list = ['C:\\Users\\hhrho\\Downloads\\train_dc.ply']
 J = 18
 T = len(ply_list)
 
