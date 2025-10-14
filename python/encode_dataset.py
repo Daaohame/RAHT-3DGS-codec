@@ -35,7 +35,7 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 ## ---------------------
 data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
 dataset = '8iVFBv2'
-sequence = 'soldier'
+sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 T = 1
 
