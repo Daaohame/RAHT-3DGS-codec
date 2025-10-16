@@ -1,5 +1,6 @@
 import scipy.io as sio
 import numpy as np
+import torch
 import argparse
 
 def compare_matrices(path1, path2, fields=("data",), rtol=1e-4, atol=1e-8, equal_nan=True):
@@ -63,17 +64,17 @@ if __name__ == "__main__":
     parser.add_argument("--atol", type=float, default=1e-8, help="Absolute tolerance (default: 1e-8)")
     args = parser.parse_args()
     
-    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_matlab.mat"
-    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_coeff_python_RAHT.mat"
+    # HARDCODED_MAT1 = "../results/frame1_C_matlab.mat"
+    # HARDCODED_MAT2 = "../results/frame1_C_python.mat"
     # fields=("data",)
     
-    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_coeff.mat"
-    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/debug_RAHT_coeff.mat"
-    # fields=("Coeff",)
+    HARDCODED_MAT1 = "../results/frame1_coeff_matlab.mat"
+    HARDCODED_MAT2 = "../results/frame1_coeff_python.mat"
+    fields=("data",)
     
-    HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
-    HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
-    fields=("ListC", "FlagsC", "weightsC")
+    # HARDCODED_MAT1 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_matlab.mat"
+    # HARDCODED_MAT2 = "/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/results/frame1_params_python.mat"
+    # fields=("ListC", "FlagsC", "weightsC")
     
     # Priority: CLI args > hardcoded
     mat1_path = args.mat1 if args.mat1 is not None else HARDCODED_MAT1

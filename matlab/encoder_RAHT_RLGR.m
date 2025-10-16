@@ -37,7 +37,6 @@ for frame =1:T
     Nvox(frame) = N;
     C = RGBtoYUV(Crgb); % shape [N x 3]
     
-    
     % ListC: indices of colors
     % FlagsC: indicator of whether a node is a left sibling to another node
     % weightsC: weights of colors
@@ -50,6 +49,10 @@ for frame =1:T
 
     fprintf('Energy of C: %.4f\n', norm(C));
     fprintf('Energy of Coeff: %.4f\n', norm(Coeff));
+
+    data = Coeff;
+    save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
+    save(sprintf('../results/frame%d_params_matlab.mat', frame), 'ListC', 'FlagsC', 'weightsC');
 
     for i=1:nSteps
         %quantize coeffs

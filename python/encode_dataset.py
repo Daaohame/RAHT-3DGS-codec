@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
-from utils import rgb_to_yuv_torch2, save_mat, save_lists
+from utils import rgb_to_yuv, rgb_to_yuv_2, save_mat, save_lists
 from RAHT import RAHT2, RAHT_optimized, RAHT2_optimized
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param2
@@ -54,14 +54,14 @@ time_log = torch.zeros(T)
 print(f"\nStarting processing for {T} frames...")
 
 for frame_idx in range(T):
-    frame = frame_idx + 1
+    frame = frame_idx + 1   # 1-based indexing
     frame_start = time.time()
     
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
     Crgb = Crgb.to(torch.float64).to(device)
-    C = rgb_to_yuv_torch2(Crgb)
+    C = rgb_to_yuv(Crgb)
     
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
     t0 = time.time()
@@ -87,7 +87,7 @@ for frame_idx in range(T):
     weightsC = [t.to(device) for t in weightsC]
     
     t2 = time.time()
-    Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
+    Coeff, w = RAHT2(C, ListC, FlagsC, weightsC)
     # Coeff_m, w_m = load_raht_out_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_out.mat", device='cpu')
     # compare_RAHT_outputs(Coeff_m, w_m, Coeff, w, rtol=1e-12, atol=1e-12)
 
