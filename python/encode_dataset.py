@@ -1,17 +1,14 @@
 import torch
 import numpy as np
 import time
-import os
-import glob
-from scipy.io import savemat
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
-from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
-from utils import rgb_to_yuv_torch2, save_mat, save_lists
-from RAHT import RAHT2, RAHT_optimized, RAHT2_optimized,is_frame_morton_ordered,block_indices
+from data_util import get_pointcloud, get_pointcloud_n_frames
+from utils import rgb_to_yuv, save_mat, save_lists
+from RAHT import RAHT2, RAHT2_optimized
 from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param2
+from RAHT_param import RAHT_param
 from crosscheck import compare_lists,load_raht_param_from_mat,compare_raht_param,load_raht_out_mat,compare_RAHT_outputs
 import rlgr
 
@@ -33,9 +30,9 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
+data_root = '/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/matlab'
 dataset = '8iVFBv2'
-sequence = 'soldier'
+sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 T = 1
 
@@ -55,18 +52,18 @@ time_log = torch.zeros(T)
 print(f"\nStarting processing for {T} frames...")
 
 for frame_idx in range(T):
-    frame = frame_idx + 1
+    frame = frame_idx + 1   # 1-based indexing
     frame_start = time.time()
 
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
     Crgb = Crgb.to(torch.float64).to(device)
-    C = rgb_to_yuv_torch2(Crgb)
-
+    C = rgb_to_yuv(Crgb)
+    
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
     t0 = time.time()
-    ListC, FlagsC, weightsC = RAHT_param2(V, origin, 2**J, J)
+    ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
     t1 = time.time()
     raht_param_time = t1 - t0
 
