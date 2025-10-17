@@ -175,14 +175,14 @@ def RAHT_optimized(C: torch.Tensor,
                    device: Union[str, torch.device] = 'cuda') -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Fully GPU-optimized Region Adaptive Hierarchical Transform (RAHT)
-    
+
     Args:
         C: Input coefficients tensor [N, number_of_attributes]
         List: List of node indices for each level
         Flags: List of binary flags indicating left siblings for each level
         weights: List of transform weights for each level
         device: Device to run computations on ('cuda' or 'cpu')
-    
+
     Returns:
         Tuple of (T, w) where:
         T: Transformed coefficients [N, number_of_attributes]
@@ -191,61 +191,61 @@ def RAHT_optimized(C: torch.Tensor,
     # Initialize T and w
     T = C.clone().to(device)
     w = torch.ones(C.size(0), 1, device=device, dtype=C.dtype)
-    
+
     Nlevels = len(Flags)
-    
+
     for j in range(Nlevels):
         # Move all data to device at once
         left_sibling_mask = Flags[j].to(device, non_blocking=True)
         list_j = List[j].to(device, non_blocking=True)
         weights_j = weights[j].to(device, non_blocking=True)
-        
+
         # Create right sibling mask using GPU operations
         right_sibling_mask = torch.cat([
             torch.zeros(1, dtype=left_sibling_mask.dtype, device=device),
             left_sibling_mask[:-1]
         ])
-        
+
         # Get sibling pairs using vectorized operations
         left_indices = list_j[left_sibling_mask.bool()]
         right_indices = list_j[right_sibling_mask.bool()]
-        
+
         if left_indices.numel() > 0 and right_indices.numel() > 0:
             # Vectorized coefficient extraction
             x0 = T[left_indices]   # [num_pairs, signal_dimension]
             x1 = T[right_indices]  # [num_pairs, signal_dimension]
-            
+
             # Vectorized weight extraction
             w0 = weights_j[left_sibling_mask.bool()]
             w1 = weights_j[right_sibling_mask.bool()]
-            
+
             # Compute transform coefficients in parallel
             w_sum = w0 + w1
             # Use rsqrt for better GPU performance
             inv_sqrt_w_sum = torch.rsqrt(w_sum)
             a = torch.sqrt(w0) * inv_sqrt_w_sum
             b = torch.sqrt(w1) * inv_sqrt_w_sum
-            
+
             # Expand for broadcasting (more efficient than unsqueeze + expand)
             a_broad = a[:, None]  # [num_pairs, 1]
             b_broad = b[:, None]  # [num_pairs, 1]
-            
+
             # Parallel RAHT transform computation
             new_x0 = a_broad * x0 + b_broad * x1
             new_x1 = -b_broad * x0 + a_broad * x1
-            
+
             # Update T using advanced indexing (parallel writes)
             T[left_indices] = new_x0
             T[right_indices] = new_x1
-            
+
             # Update weights in parallel
             w_left_old = w[left_indices, 0]
             w_right_old = w[right_indices, 0]
             w_new = w_left_old + w_right_old
-            
+
             w[left_indices, 0] = w_new
             w[right_indices, 0] = w_new
-    
+
     return T, w
 
 
@@ -335,3 +335,171 @@ def RAHT2_optimized(C,
 
     return T, w
 
+@torch.no_grad()
+def RAHT2_optimized(C,
+               List,
+               Flags,
+               weights,
+               one_based: bool = False):
+    """
+    PyTorch version of:
+        function [T,w] = RAHT(C,List,Flags,weights)
+
+    Parameters
+    ----------
+    C : (N, D) float tensor
+        Input attributes (rows correspond to points in Morton order).
+    List : list[LongTensor]
+        From RAHT_param_torch; List[j] are group start indices at level j.
+    Flags : list[BoolTensor]
+        Flags[j][k]==True iff k and k+1 share the same MSB prefix at level j.
+        Last element padded False (same as MATLAB).
+    weights : list[LongTensor]
+        Run-length weights per level (length of each group).
+    one_based : bool
+        If True, `List` entries are 1-based and will be converted to 0-based for tensor indexing.
+
+    Returns
+    -------
+    T : (N, D) float tensor
+        Transformed coefficients.
+    w : (N, 1)  long tensor
+        Aggregated node weights after combining siblings.
+    """
+    device = C.device
+    N, D = C.shape
+    T = C.to(torch.float64).to(device)
+    w = torch.ones((N, 1), dtype=torch.float64, device=device)
+
+    def to0(idx: torch.Tensor) -> torch.Tensor:
+        return idx - 1 if one_based else idx
+
+    Nlevels = len(Flags)
+    # MATLAB: for j = 1:Nlevels-3  (1-based). Python 0-based: range(Nlevels-3)
+    for j in range(Nlevels):
+    # for j in range(1):
+        # sibling masks at this level
+        left_mask  = Flags[j]                              # (len(List[j]),)
+        right_mask = torch.cat([torch.tensor([False], device=device),
+                                Flags[j][:-1]])            # [0; Flags(1:end-1)]
+
+        # indices of left and right siblings (in the global order)
+        i0 = List[j][left_mask]                            # starts that HAVE right siblings
+        i1 = List[j][right_mask]                           # their right siblings
+
+        if i0.numel() == 0:                                # nothing to do at this level
+            continue
+
+        i0_ = to0(i0).long()
+        i1_ = to0(i1).long()
+
+        # pick coefficients
+        x0 = T.index_select(0, i0_)                        # (M,D)
+        x1 = T.index_select(0, i1_)                        # (M,D)
+
+        # pick transform weights for this level (run-lengths)
+        w0 = weights[j][left_mask].to(torch.float64)       # (M,)
+        w1 = weights[j][right_mask].to(torch.float64)      # (M,)
+        denom = w0 + w1
+        # numerical safety（不期望出现0，但以防万一）
+        # denom = torch.clamp(denom, min=1e-12)
+
+        a = torch.sqrt(w0 / denom).unsqueeze(1)  # (M,1)
+        b = torch.sqrt(w1 / denom).unsqueeze(1)  # (M,1)
+
+        # update node weights (MATLAB: w(i0)=w(i0)+w(i1); w(i1)=w(i0))
+        new_w0 = w.index_select(0, i0_) + w.index_select(0, i1_)  # (M,1)
+        new_w1 = new_w0.clone()
+        w.scatter_(0, i0_.unsqueeze(1), new_w0)
+        w.scatter_(0, i1_.unsqueeze(1), new_w1)
+
+        # 2x2 RAHT butterfly
+        T_i0 = a * x0 + b * x1
+        T_i1 = -b * x0 + a * x1
+        T.scatter_(0, i0_.unsqueeze(1).expand(-1, D), T_i0)
+        T.scatter_(0, i1_.unsqueeze(1).expand(-1, D), T_i1)
+
+    return T, w
+
+
+def block_indices(V: torch.Tensor, bsize: int):
+    """
+
+    Args:
+        V (torch.Tensor): Nx3 point cloud tensor (integer or float)
+        bsize (int): block size
+
+    Returns:
+        indices (torch.Tensor): indices (1-based, like MATLAB)
+    """
+    # ensure tensor
+    if not torch.is_tensor(V):
+        V = torch.tensor(V, dtype=torch.float64)
+
+    # Coarsen coordinates by block size
+    V_coarse = torch.floor(V / bsize) * bsize  # Nx3
+
+    # Compute absolute variation between consecutive points
+    diff = torch.abs(V_coarse[1:] - V_coarse[:-1])  # (N-1)x3
+    variation = torch.sum(diff, dim=1)  # (N-1,)
+
+    # Prepend a leading 1 to mimic MATLAB behavior
+    variation = torch.cat([torch.ones(1, dtype=variation.dtype), variation])
+
+    # Find indices where variation ≠ 0
+    indices = torch.nonzero(variation, as_tuple=True)[0]
+    indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
+
+    return indices,indices_remain
+
+
+def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
+    """
+    Equivalent to MATLAB function:
+        [error, out, index] = is_frame_morton_ordered(Vin, J)
+
+    Args:
+        Vin (torch.Tensor): Nx3 tensor, each row = (x, y, z)
+        J (int): number of bits per coordinate
+
+    Returns:
+        error (float): L2 norm between original and sorted coordinates
+        out (torch.Tensor): Vin reordered by Morton order
+        index (torch.Tensor): sorting indices
+    """
+
+    # Ensure type
+    if not torch.is_tensor(Vin):
+        Vin = torch.tensor(Vin, dtype=torch.float64)
+    else:
+        Vin = Vin.to(torch.float64)
+
+    N = Vin.shape[0]
+
+    # floor (same as MATLAB floor(double(Vin)))
+    V = torch.floor(Vin).to(torch.int64)
+
+    # Initialize morton code
+    M = torch.zeros(N, dtype=torch.int64)
+
+    # tt = [1, 2, 4]^T
+    tt = torch.tensor([1, 2, 4], dtype=torch.int64)
+
+    # Compute Morton code
+    for i in range(1, J + 1):
+        bits = torch.bitwise_and(torch.bitwise_right_shift(V, i - 1), 1)  # bitget(V, i)
+        bits_flipped = torch.flip(bits, dims=[1])                         # fliplr
+        M = M + torch.matmul(bits_flipped, tt)
+        tt = tt * 8
+
+    # Sort Morton code
+    M_sorted, index = torch.sort(M)
+
+    # Reorder points
+    V_sorted = V[index, :]
+    out = Vin[index, :]
+
+    # Compute error (norm of difference)
+    error = torch.norm(V.to(torch.float64) - V_sorted.to(torch.float64)).item()
+
+    return error, out, index
