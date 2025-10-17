@@ -32,22 +32,6 @@ def rgb_to_yuv(rgb: torch.Tensor) -> torch.Tensor:
     yuv = torch.clamp(yuv, 0.0, 1.0) * 255.0
     return yuv
 
-def rgb_to_yuv_2(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV using BT.709 full-range."""
-    r, g, b = rgb_tensor[:, 0], rgb_tensor[:, 1], rgb_tensor[:, 2]
-    Y = torch.clamp(torch.floor(0.212600 * r + 0.715200 * g + 0.072200 * b + 0.5), 0.0, 255.0)
-    U = torch.clamp(torch.floor(-0.114572 * r - 0.385428 * g + 0.5 * b + 128.0 + 0.5), 0.0, 255.0)
-    V = torch.clamp(torch.floor(0.5 * r - 0.454153 * g - 0.045847 * b + 128.0 + 0.5), 0.0, 255.0)
-    return torch.stack([Y, U, V], dim=1)
-
-# def rgb_to_yuv_2(rgb_tensor: torch.Tensor):
-#     """Converts an Nx3 PyTorch tensor of RGB colors [0,255] to YUV using BT.601 full-range."""
-#     r, g, b = rgb_tensor[:, 0], rgb_tensor[:, 1], rgb_tensor[:, 2]
-#     Y = torch.clamp(torch.floor(0.299000 * r + 0.587000 * g + 0.114000 * b + 0.5), 0.0, 255.0)
-#     U = torch.clamp(torch.floor(-0.168736 * r - 0.331264 * g + 0.500000 * b + 128.0 + 0.5), 0.0, 255.0)
-#     V = torch.clamp(torch.floor( 0.500000 * r - 0.418688 * g - 0.081312 * b + 128.0 + 0.5), 0.0, 255.0)
-#     return torch.stack([Y, U, V], dim=1)
-
 
 def save_mat(tensor: torch.Tensor, filename: str) -> None:
     savemat(filename, {"data": tensor.detach().cpu().numpy()})

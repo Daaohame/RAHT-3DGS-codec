@@ -50,10 +50,6 @@ for frame =1:T
     fprintf('Energy of C: %.4f\n', norm(C));
     fprintf('Energy of Coeff: %.4f\n', norm(Coeff));
 
-    data = Coeff;
-    save(sprintf('../results/frame%d_coeff_matlab.mat', frame), 'data');
-    save(sprintf('../results/frame%d_params_matlab.mat', frame), 'ListC', 'FlagsC', 'weightsC');
-
     for i=1:nSteps
         %quantize coeffs
         step = colorStep(i);

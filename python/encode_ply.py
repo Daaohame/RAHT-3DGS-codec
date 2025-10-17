@@ -1,21 +1,19 @@
 import torch
 import numpy as np
 import time
-import os
-import glob
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 from data_util import read_ply_file
 from utils import save_mat, save_lists
-from RAHT import RAHT, RAHT_optimized, RAHT_batched
+from RAHT import RAHT2, RAHT2_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param2 as RAHT_param
+from RAHT_param import RAHT_param
 import rlgr
 
 VARIANTS = {
-    "RAHT":             lambda C,L,F,W,d: RAHT(C, L, F, W, d),
-    "RAHT_optimized":   lambda C,L,F,W,d: RAHT_optimized(C, L, F, W, d),
+    "RAHT":             lambda C,L,F,W,d: RAHT2(C, L, F, W, d),
+    "RAHT_optimized":   lambda C,L,F,W,d: RAHT2_optimized(C, L, F, W, d),
     "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
 }
 
@@ -68,24 +66,6 @@ for frame_idx in range(T):
     ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
     t1 = time.time()
     raht_param_time = t1 - t0
-    save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
-    
-    # saved_matlab_res = loadmat("../results/frame1_params_matlab.mat", simplify_cells=True)
-    # ListC = saved_matlab_res["ListC"]
-    # FlagsC = saved_matlab_res["FlagsC"]
-    # weightsC = saved_matlab_res["weightsC"]
-    # def to_tensor_list(seq, dtype, device):
-    #     out = []
-    #     for x in seq:
-    #         a = np.asarray(x)            # unwrap scalar/object to ndarray
-    #         a = np.squeeze(a)            # drop stray singleton dims
-    #         t = torch.as_tensor(a, dtype=dtype, device=device)
-    #         out.append(t)
-    #     return out
-    # ListC    = to_tensor_list(ListC,    dtype=torch.int64,   device=device)
-    # ListC    = [t - 1 for t in ListC]  # convert to 0-based indexing
-    # FlagsC   = to_tensor_list(FlagsC,   dtype=torch.bool, device=device)
-    # weightsC = to_tensor_list(weightsC, dtype=torch.int64,   device=device)
     
     ListC = [t.to(device) for t in ListC]
     FlagsC = [t.to(device) for t in FlagsC]
@@ -104,7 +84,6 @@ for frame_idx in range(T):
         t3 = time.time()
         timings[name] = t3 - t2
         coeffs_by_variant[name] = Coeff
-        save_mat(Coeff, f"../results/frame{frame}_coeff_python_{name}.mat")
         
         if DEBUG:
             print(f"Norm of C: {torch.norm(C)}")
@@ -153,24 +132,6 @@ for frame_idx in range(T):
     print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s")
     for name, t in timings.items():
         print(f"  {name}: {t:.6f}s")
-    
-    # # Sort weights in descending order
-    # _, IX_ref = torch.sort(w, descending=True)
-    # Y = Coeff[:, 0]
-    
-    # # Loop through quantization steps
-    # for i in range(nSteps):
-    #     step = colorStep[i]
-    #     Coeff_enc = torch.round(Coeff / step)
-    #     Y_hat = Coeff_enc[:, 0] * step
-        
-    #     MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
-        
-    #     nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-    #     nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-    #     nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
-        
-    #     bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
     
     time_log[frame_idx] = time.time() - frame_start
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
