@@ -31,3 +31,11 @@ def save_lists(filename, **kwargs):
     for key, tensor_list in kwargs.items():
         out[key] = [t.detach().cpu().numpy() for t in tensor_list]
     savemat(filename, out)
+
+def signed_to_unsigned(v):
+    return torch.where(v >= 0, 2 * v, -2 * v - 1)
+
+def unsigned_to_signed(u):
+    torch.where(u % 2 == 0,
+                torch.div(u, 2, rounding_mode='floor'),
+                -torch.div(u, 2, rounding_mode='floor') - 1)
