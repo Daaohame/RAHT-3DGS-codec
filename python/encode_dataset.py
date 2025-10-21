@@ -5,26 +5,13 @@ import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 from data_util import get_pointcloud, get_pointcloud_n_frames
-from utils import rgb_to_yuv, save_mat, save_lists, block_indices, is_frame_morton_ordered
+from utils import rgb_to_yuv, save_mat, save_lists, block_indices, is_frame_morton_ordered, sanity_check_vector
 from RAHT import RAHT2, RAHT2_optimized
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
 import rlgr
 
-DEBUG = True
-
-def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
-    """
-    Sanity check: max(T) == sqrt(N) * mean(C)
-    T, C: 1D tensors of shape [N]
-    """
-    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), "T and C must be 1D with same length"
-    N = T.size(0)
-
-    lhs = T.max()
-    rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
-
-    return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
+DEBUG = False
 
 ## ---------------------
 ## Configuration
@@ -141,25 +128,36 @@ for frame_idx in range(T):
         # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
         # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
 
-        enc = rlgr.file(filename, 1)
         Y_list = [int(i) for i in Coeff_enc[order_RAHT, 0].tolist()] #order_RAHT order_RAGFT order_morton
         U_list = [int(i) for i in Coeff_enc[order_RAHT, 1].tolist()]
         V_list = [int(i) for i in Coeff_enc[order_RAHT, 2].tolist()]
-        Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
+        
+        enc = rlgr.file(filename, 1)
         enc.rlgrWrite(Y_list, int(1))
-        enc.rlgrWrite(U_list, int(1))
-        enc.rlgrWrite(V_list, int(1))
         enc.close()
-        size_bytes = os.path.getsize(filename)
-        rates.append(size_bytes*8/N)
-
         dec = rlgr.file(filename, 0)
         Y_list_dec = dec.rlgrRead(N, 1)
-        U_list_dec = dec.rlgrRead(N, 1)
-        V_list_dec = dec.rlgrRead(N, 1)
+        bytesY = os.path.getsize(filename)
         dec.close()
-
-        # rates.append(size_bytes)
+        
+        enc = rlgr.file(filename, 1)
+        enc.rlgrWrite(U_list, int(1))
+        enc.close()
+        dec = rlgr.file(filename, 0)
+        U_list_dec = dec.rlgrRead(N, 1)
+        bytesU = os.path.getsize(filename)
+        dec.close()
+        
+        enc = rlgr.file(filename, 1)
+        enc.rlgrWrite(V_list, int(1))
+        enc.close()
+        dec = rlgr.file(filename, 0)
+        V_list_dec = dec.rlgrRead(N, 1)
+        bytesV = os.path.getsize(filename)
+        dec.close()
+        
+        size_bytes = bytesY + bytesU + bytesV
+        rates.append(size_bytes * 8 / N)
 
     time_log[frame_idx] = time.time() - frame_start
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")

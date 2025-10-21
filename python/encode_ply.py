@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.io import loadmat
 
 from data_util import read_ply_file
-from utils import save_mat, save_lists
+from utils import save_mat, save_lists, sanity_check_vector
 from RAHT import RAHT2, RAHT2_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
@@ -18,20 +18,6 @@ VARIANTS = {
 }
 
 DEBUG = True
-
-def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
-    """
-    Sanity check: max(T) == sqrt(N) * mean(C)
-    T, C: 1D tensors of shape [N]
-    """
-    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), "T and C must be 1D with same length"
-    N = T.size(0)
-
-    lhs = T.max()
-    rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
-
-    return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
-
 
 ## ---------------------
 ## Configuration

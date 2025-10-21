@@ -41,37 +41,20 @@ def save_lists(filename, **kwargs):
     for key, tensor_list in kwargs.items():
         out[key] = [t.detach().cpu().numpy() for t in tensor_list]
     savemat(filename, out)
-    
-    
-def block_indices(V: torch.Tensor, bsize: int):
+
+
+def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
     """
-
-    Args:
-        V (torch.Tensor): Nx3 point cloud tensor (integer or float)
-        bsize (int): block size
-
-    Returns:
-        indices (torch.Tensor): indices (1-based, like MATLAB)
+    Sanity check: max(T) == sqrt(N) * mean(C)
+    T, C: 1D tensors of shape [N]
     """
-    # ensure tensor
-    if not torch.is_tensor(V):
-        V = torch.tensor(V, dtype=torch.float64)
+    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), "T and C must be 1D with same length"
+    N = T.size(0)
 
-    # Coarsen coordinates by block size
-    V_coarse = torch.floor(V / bsize) * bsize  # Nx3
+    lhs = T.max()
+    rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
 
-    # Compute absolute variation between consecutive points
-    diff = torch.abs(V_coarse[1:] - V_coarse[:-1])  # (N-1)x3
-    variation = torch.sum(diff, dim=1)  # (N-1,)
-
-    # Prepend a leading 1 to mimic MATLAB behavior
-    variation = torch.cat([torch.ones(1, dtype=variation.dtype), variation])
-
-    # Find indices where variation ≠ 0
-    indices = torch.nonzero(variation, as_tuple=True)[0]
-    indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
-
-    return indices,indices_remain
+    return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
 
 
 def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
@@ -124,3 +107,34 @@ def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
     error = torch.norm(V.to(torch.float64) - V_sorted.to(torch.float64)).item()
 
     return error, out, index
+
+
+def block_indices(V: torch.Tensor, bsize: int):
+    """
+
+    Args:
+        V (torch.Tensor): Nx3 point cloud tensor (integer or float)
+        bsize (int): block size
+
+    Returns:
+        indices (torch.Tensor): indices (1-based, like MATLAB)
+    """
+    # ensure tensor
+    if not torch.is_tensor(V):
+        V = torch.tensor(V, dtype=torch.float64)
+
+    # Coarsen coordinates by block size
+    V_coarse = torch.floor(V / bsize) * bsize  # Nx3
+
+    # Compute absolute variation between consecutive points
+    diff = torch.abs(V_coarse[1:] - V_coarse[:-1])  # (N-1)x3
+    variation = torch.sum(diff, dim=1)  # (N-1,)
+
+    # Prepend a leading 1 to mimic MATLAB behavior
+    variation = torch.cat([torch.ones(1, dtype=variation.dtype), variation])
+
+    # Find indices where variation ≠ 0
+    indices = torch.nonzero(variation, as_tuple=True)[0]
+    indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
+
+    return indices,indices_remain

@@ -12,33 +12,8 @@ from RAHT import RAHT, RAHT_optimized, RAHT_batched
 from iRAHT import inverse_RAHT
 from RAHT_param import RAHT_param
 from voxelize import voxelize_pc
+from utils import sanity_check_vector, rgb_to_yuv
 
-def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) -> bool:
-    """
-    Sanity check: max(T) == sqrt(N) * mean(C)
-    T, C: 1D tensors of shape [N]
-    """
-    assert T.dim() == 1 and C.dim() == 1 and T.size(0) == C.size(0), \
-        "T and C must be 1D with same length"
-    N = T.size(0)
-    
-    lhs = T.max()
-    rhs = torch.sqrt(torch.tensor(float(N), dtype=C.dtype, device=C.device)) * C.mean()
-    
-    return torch.allclose(lhs, rhs, rtol=rtol, atol=atol)
-
-def rgb_to_yuv_torch(rgb_tensor):
-    """Converts a PyTorch tensor of RGB colors [0,255] to YUV."""
-    rgb_tensor = rgb_tensor.float()
-    conversion_matrix = torch.tensor([
-        [0.2126, 0.7152, 0.0722],
-        [-0.1146, -0.3854, 0.5000],
-        [0.5000, -0.4542, -0.0458]
-    ]).to(rgb_tensor.device)
-    
-    yuv = torch.matmul(rgb_tensor, conversion_matrix.T)
-    yuv[:, 1:] += 128.0 # Add offset to U and V
-    return yuv
 
 # Configuration
 DEBUG = True
@@ -74,7 +49,7 @@ V0s = PCsorted[:, 0:3] - vmin_tensor  # sorted coordinates
 V0i = torch.floor(V0s / voxel_size)   # sorted voxel indices
 V = V0i[voxel_indices, :]             # Morton-ordered voxel coords
 Cvox = PCvox[:, 3:]                   # already Morton-ordered colors
-C = rgb_to_yuv_torch(Cvox)  # Convert to YUV color space
+C = rgb_to_yuv(Cvox)  # Convert to YUV color space
 
 J = param['J']
 
