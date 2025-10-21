@@ -41,3 +41,86 @@ def save_lists(filename, **kwargs):
     for key, tensor_list in kwargs.items():
         out[key] = [t.detach().cpu().numpy() for t in tensor_list]
     savemat(filename, out)
+    
+    
+def block_indices(V: torch.Tensor, bsize: int):
+    """
+
+    Args:
+        V (torch.Tensor): Nx3 point cloud tensor (integer or float)
+        bsize (int): block size
+
+    Returns:
+        indices (torch.Tensor): indices (1-based, like MATLAB)
+    """
+    # ensure tensor
+    if not torch.is_tensor(V):
+        V = torch.tensor(V, dtype=torch.float64)
+
+    # Coarsen coordinates by block size
+    V_coarse = torch.floor(V / bsize) * bsize  # Nx3
+
+    # Compute absolute variation between consecutive points
+    diff = torch.abs(V_coarse[1:] - V_coarse[:-1])  # (N-1)x3
+    variation = torch.sum(diff, dim=1)  # (N-1,)
+
+    # Prepend a leading 1 to mimic MATLAB behavior
+    variation = torch.cat([torch.ones(1, dtype=variation.dtype), variation])
+
+    # Find indices where variation ≠ 0
+    indices = torch.nonzero(variation, as_tuple=True)[0]
+    indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
+
+    return indices,indices_remain
+
+
+def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
+    """
+    Equivalent to MATLAB function:
+        [error, out, index] = is_frame_morton_ordered(Vin, J)
+
+    Args:
+        Vin (torch.Tensor): Nx3 tensor, each row = (x, y, z)
+        J (int): number of bits per coordinate
+
+    Returns:
+        error (float): L2 norm between original and sorted coordinates
+        out (torch.Tensor): Vin reordered by Morton order
+        index (torch.Tensor): sorting indices
+    """
+
+    # Ensure type
+    if not torch.is_tensor(Vin):
+        Vin = torch.tensor(Vin, dtype=torch.float64)
+    else:
+        Vin = Vin.to(torch.float64)
+
+    N = Vin.shape[0]
+
+    # floor (same as MATLAB floor(double(Vin)))
+    V = torch.floor(Vin).to(torch.int64)
+
+    # Initialize morton code
+    M = torch.zeros(N, dtype=torch.int64)
+
+    # tt = [1, 2, 4]^T
+    tt = torch.tensor([1, 2, 4], dtype=torch.int64)
+
+    # Compute Morton code
+    for i in range(1, J + 1):
+        bits = torch.bitwise_and(torch.bitwise_right_shift(V, i - 1), 1)  # bitget(V, i)
+        bits_flipped = torch.flip(bits, dims=[1])                         # fliplr
+        M = M + torch.matmul(bits_flipped, tt)
+        tt = tt * 8
+
+    # Sort Morton code
+    M_sorted, index = torch.sort(M)
+
+    # Reorder points
+    V_sorted = V[index, :]
+    out = Vin[index, :]
+
+    # Compute error (norm of difference)
+    error = torch.norm(V.to(torch.float64) - V_sorted.to(torch.float64)).item()
+
+    return error, out, index

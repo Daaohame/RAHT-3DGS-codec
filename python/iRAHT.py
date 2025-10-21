@@ -2,79 +2,40 @@ import torch
 import torch.nn.functional as F
 from typing import List, Tuple, Union
 
-def inverse_RAHT(Coeff, List, Flags, weights, device: Union[str, torch.device] = 'cuda'):
+def inverse_RAHT(Coeff: torch.Tensor, List, Flags, weights):
     """
-    Converts the MATLAB iRAHT (inverse) function to Python using PyTorch.
-
-    This function reconstructs the signal from its RAHT coefficients by
-    processing the hierarchy levels in reverse (top-down).
-
-    Args:
-        Coeff (torch.Tensor): Input tensor of RAHT coefficients, shape [N, ...].
-        List (list of torch.Tensor): List of index tensors for each level.
-        Flags (list of torch.Tensor): List of binary flag tensors for each level.
-        weights (list of torch.Tensor): List of weight tensors for each level.
-
-    Returns:
-        torch.Tensor: The reconstructed signal tensor T.
+    GPU/CPU compatible version of inverse RAHT transform.
     """
+    device = Coeff.device
+
     T = Coeff.clone().to(device)
     Nlevels = len(Flags)
 
-    # MATLAB: for j=Nlevels:-1:1
-    # Iterate top-down, from the last level to the first.
     for j in range(Nlevels - 1, -1, -1):
+        left_sibling_index = Flags[j].to(device)
+        right_sibling_index = torch.cat([
+            torch.zeros(1, dtype=left_sibling_index.dtype, device=device),
+            left_sibling_index[:-1]
+        ])
 
-        # The logic to find sibling pairs is identical to the forward transform.
-        # MATLAB: left_sibling_index=Flags{j};
-        left_sibling_index = Flags[j]
+        i0 = List[j][left_sibling_index == 1].to(device)
+        i1 = List[j][right_sibling_index == 1].to(device)
 
-        # MATLAB: right_sibling_index=[0;Flags{j}(1:end-1)];
-        zero_tensor = torch.tensor([0], device=Coeff.device, dtype=left_sibling_index.dtype)
-        right_sibling_index = torch.cat((zero_tensor, left_sibling_index[:-1]))
+        x0 = T[i0, :]
+        x1 = T[i1, :]
+        signal_dimension = T.shape[1]
 
-        # Create boolean masks for logical indexing
-        i0_mask = (left_sibling_index == 1)
-        i1_mask = (right_sibling_index == 1)
+        w0 = weights[j][left_sibling_index == 1].to(device)
+        w1 = weights[j][right_sibling_index == 1].to(device)
 
-        # MATLAB: i0=List{j}(left_sibling_index==1);
-        i0 = List[j][i0_mask]
+        a = torch.sqrt(w0 / (w0 + w1)).unsqueeze(1).expand(-1, signal_dimension)
+        b = torch.sqrt(w1 / (w0 + w1)).unsqueeze(1).expand(-1, signal_dimension)
 
-        # MATLAB: i1=List{j}(right_sibling_index==1);
-        i1 = List[j][i1_mask]
-
-        # MATLAB: if(~isempty(i0) && ~isempty(i1))
-        if i0.numel() > 0 and i1.numel() > 0:
-            # MATLAB: x0=T(i0,:);
-            x0 = T[i0, :]  # These are the scaling/averaging coefficients
-            # MATLAB: x1=T(i1,:);
-            x1 = T[i1, :]  # These are the detail/difference coefficients
-
-            # MATLAB: w0=weights{j}(left_sibling_index==1);
-            w0 = weights[j][i0_mask]
-            # MATLAB: w1=weights{j}(right_sibling_index==1);
-            w1 = weights[j][i1_mask]
-
-            # MATLAB: a=sqrt(w0./(w0+w1));
-            # MATLAB: b=sqrt(w1./(w0+w1));
-            w_sum = w0 + w1
-            # Add a small epsilon to avoid division by zero if w_sum is 0
-            a = torch.sqrt(w0 / (w_sum + 1e-9))
-            b = torch.sqrt(w1 / (w_sum + 1e-9))
-
-            # Reshape a and b to prevent broadcasting errors, as identified previously.
-            # This makes the code robust for 2D or 3D input tensors.
-            a_reshaped = a.view(-1, *([1] * (x0.ndim - 1)))
-            b_reshaped = b.view(-1, *([1] * (x0.ndim - 1)))
-
-            # Apply the inverse transform operations
-            # MATLAB: T(i0,:)=repmat(a,1,signal_dimension).*x0-repmat(b,1,signal_dimension).*x1;
-            T[i0, :] = a_reshaped * x0 - b_reshaped * x1
-            
-            # MATLAB: T(i1,:)=repmat(b,1,signal_dimension).*x0+repmat(a,1,signal_dimension).*x1;
-            T[i1, :] = b_reshaped * x0 + a_reshaped * x1
+        T[i0, :] = a * x0 - b * x1
+        T[i1, :] = b * x0 + a * x1
 
     return T
+
 
 def inverse_RAHT_optimized(T: torch.Tensor, 
                            List: List[torch.Tensor], 
