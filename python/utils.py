@@ -71,35 +71,36 @@ def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
         out (torch.Tensor): Vin reordered by Morton order
         index (torch.Tensor): sorting indices
     """
-
-    # Ensure type
+    # Ensure tensor, dtype, and device consistency
     if not torch.is_tensor(Vin):
         Vin = torch.tensor(Vin, dtype=torch.float64)
     else:
         Vin = Vin.to(torch.float64)
+    device = Vin.device
 
     N = Vin.shape[0]
 
     # floor (same as MATLAB floor(double(Vin)))
-    V = torch.floor(Vin).to(torch.int64)
+    V = torch.floor(Vin).to(dtype=torch.int64, device=device)
 
-    # Initialize morton code
-    M = torch.zeros(N, dtype=torch.int64)
+    # Initialize morton code on Vin.device
+    M = torch.zeros(N, dtype=torch.int64, device=device)
 
-    # tt = [1, 2, 4]^T
-    tt = torch.tensor([1, 2, 4], dtype=torch.int64)
+    # tt = [1, 2, 4]^T on Vin.device
+    tt = torch.tensor([1, 2, 4], dtype=torch.int64, device=device)
 
-    # Compute Morton code
+    # Compute Morton code (avoid float-only addmv path)
     for i in range(1, J + 1):
-        bits = torch.bitwise_and(torch.bitwise_right_shift(V, i - 1), 1)  # bitget(V, i)
-        bits_flipped = torch.flip(bits, dims=[1])                         # fliplr
-        M = M + torch.matmul(bits_flipped, tt)
+        bits = (V.bitwise_right_shift(i - 1)).bitwise_and(1)  # bitget(V, i)
+        bits_flipped = torch.flip(bits, dims=[1])             # fliplr
+        incr = (bits_flipped * tt).sum(dim=1)                 # int64-safe reduction
+        M = M + incr
         tt = tt * 8
 
     # Sort Morton code
-    M_sorted, index = torch.sort(M)
+    _, index = torch.sort(M)
 
-    # Reorder points
+    # Reorder points (stay on Vin.device)
     V_sorted = V[index, :]
     out = Vin[index, :]
 
@@ -111,7 +112,6 @@ def is_frame_morton_ordered(Vin: torch.Tensor, J: int):
 
 def block_indices(V: torch.Tensor, bsize: int):
     """
-
     Args:
         V (torch.Tensor): Nx3 point cloud tensor (integer or float)
         bsize (int): block size
@@ -119,9 +119,13 @@ def block_indices(V: torch.Tensor, bsize: int):
     Returns:
         indices (torch.Tensor): indices (1-based, like MATLAB)
     """
-    # ensure tensor
+
+    # ensure tensor and device consistency
     if not torch.is_tensor(V):
         V = torch.tensor(V, dtype=torch.float64)
+    else:
+        V = V.to(torch.float64)
+    device = V.device
 
     # Coarsen coordinates by block size
     V_coarse = torch.floor(V / bsize) * bsize  # Nx3
@@ -131,10 +135,12 @@ def block_indices(V: torch.Tensor, bsize: int):
     variation = torch.sum(diff, dim=1)  # (N-1,)
 
     # Prepend a leading 1 to mimic MATLAB behavior
-    variation = torch.cat([torch.ones(1, dtype=variation.dtype), variation])
+    variation = torch.cat(
+        [torch.ones(1, dtype=variation.dtype, device=device), variation.to(device)]
+    )
 
     # Find indices where variation ≠ 0
     indices = torch.nonzero(variation, as_tuple=True)[0]
     indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
 
-    return indices,indices_remain
+    return indices.to(device), indices_remain.to(device)
