@@ -23,7 +23,7 @@ def RAHT_param(
     Vint = torch.floor((V - minV) / Q).to(torch.int64)
 
     if (Vint < 0).any() or (Vint > (2 ** depth - 1)).any():
-        raise ValueError("RAHT_param2:OutOfBounds: indices must be within [0, 2^depth-1] per axis.")
+        raise ValueError("RAHT_param:OutOfBounds: indices must be within [0, 2^depth-1] per axis.")
 
     # --- Morton code MC (int64) ---
     MC = torch.zeros(N, dtype=torch.int64, device=device)

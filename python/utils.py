@@ -144,3 +144,11 @@ def block_indices(V: torch.Tensor, bsize: int):
     indices_remain = torch.nonzero(variation == 0, as_tuple=True)[0]
 
     return indices.to(device), indices_remain.to(device)
+
+def signed_to_unsigned(v):
+    return torch.where(v >= 0, 2 * v, -2 * v - 1)
+
+def unsigned_to_signed(u):
+    torch.where(u % 2 == 0,
+                torch.div(u, 2, rounding_mode='floor'),
+                -torch.div(u, 2, rounding_mode='floor') - 1)
