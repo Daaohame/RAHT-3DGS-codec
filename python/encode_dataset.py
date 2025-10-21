@@ -2,15 +2,18 @@ import torch
 import numpy as np
 import time
 import os
+import io
+import py7zr
 import glob
 from scipy.io import savemat
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
+import cabac
 
 from data_util import get_pointcloud, get_pointcloud_n_frames, read_ply_file
 from utils import rgb_to_yuv_torch2, save_mat, save_lists
 from RAHT import RAHT2, RAHT_optimized, RAHT2_optimized,is_frame_morton_ordered,block_indices
-from iRAHT import inverse_RAHT
+from iRAHT import iRAHT
 from RAHT_param import RAHT_param2
 from crosscheck import compare_lists,load_raht_param_from_mat,compare_raht_param,load_raht_out_mat,compare_RAHT_outputs
 import rlgr
@@ -35,14 +38,14 @@ def sanity_check_vector(T: torch.Tensor, C: torch.Tensor, rtol=1e-5, atol=1e-8) 
 ## ---------------------
 data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
 dataset = '8iVFBv2'
-sequence = 'soldier'
+sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 T = 1
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
-# colorStep = [1]
+# colorStep = [64]
 nSteps = len(colorStep)
 bytes_log = torch.zeros((T, nSteps))
 MSE = torch.zeros((T, nSteps))
@@ -92,8 +95,8 @@ for frame_idx in range(T):
     # Coeff_m, w_m = load_raht_out_mat("F:\\Desktop\\Motion_Vector_Database\\ref_raht_out.mat", device='cpu')
     # compare_RAHT_outputs(Coeff_m, w_m, Coeff, w, rtol=1e-12, atol=1e-12)
 
-    t3 = time.time()
-    raht_transform_time = t3 - t2
+    C_rec = iRAHT(Coeff, ListC, FlagsC, weightsC)
+    print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
 
     error, V, index = is_frame_morton_ordered(V, J)
     ac_list = []
@@ -113,8 +116,12 @@ for frame_idx in range(T):
     ac_list = ac_list[::-1]
     order_RAGFT = torch.cat(ac_list)
 
-    t4 = time.time()
-    raht_reorder_RAGFT_time = t4 - t3
+    t3 = time.time()
+    raht_transform_time = t3 - t2
+
+    # Print timing information
+    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
+          f"RAHT_optimized={raht_transform_time:.6f}s")
 
     if DEBUG:
         save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
@@ -124,25 +131,12 @@ for frame_idx in range(T):
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
-        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
+        # C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
+        # print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
 
     # Sort weights in descending order
-
     values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
-    t5 = time.time()
-    raht_reorder_RAHT_time = t5 - t4
-
     order_morton = torch.arange(0,V.shape[0])
-    t6 = time.time()
-    raht_reorder_morton_time = t6 - t5
-
-    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-          f"RAHT_optimized={raht_transform_time:.6f}s, "
-          f"RAHT_reorder_RAGFT={raht_reorder_RAGFT_time:.6f}s, "
-          f"RAHT_reorder_RAHT={raht_reorder_RAHT_time:.6f}s, "
-          f"RAHT_reorder_morton={raht_reorder_morton_time:.6f}s")
-
     Y = Coeff[:, 0]
 
     # temporary: filename for PyRLGR
@@ -161,10 +155,11 @@ for frame_idx in range(T):
         # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
         # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
 
+        ## RLGR
         enc = rlgr.file(filename, 1)
-        Y_list = [int(i) for i in Coeff_enc[order_RAHT, 0].tolist()] #order_RAHT order_RAGFT order_morton
-        U_list = [int(i) for i in Coeff_enc[order_RAHT, 1].tolist()]
-        V_list = [int(i) for i in Coeff_enc[order_RAHT, 2].tolist()]
+        Y_list = [int(i) for i in Coeff_enc[order_RAGFT, 0].tolist()] #order_RAHT order_RAGFT order_morton
+        U_list = [int(i) for i in Coeff_enc[order_RAGFT, 1].tolist()]
+        V_list = [int(i) for i in Coeff_enc[order_RAGFT, 2].tolist()]
         Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
         enc.rlgrWrite(Y_list, int(1))
         enc.rlgrWrite(U_list, int(1))
@@ -179,11 +174,70 @@ for frame_idx in range(T):
         V_list_dec = dec.rlgrRead(N, 1)
         dec.close()
 
-        # rates.append(size_bytes)
+        ## lzma
+        # Step 1️⃣: 序列化 tensor 到内存字节流
+        # buf = io.BytesIO()
+        # torch.save(Coeff_enc, buf)
+        # buf.seek(0)
+        # data = buf.getvalue()
+        #
+        # # Step 2️⃣: 创建新的内存流用于存放压缩数据
+        # compressed_buf = io.BytesIO()
+        #
+        # # ✅ 用 writestr，arcname 必须是简单文件名（不能带路径！）
+        # with py7zr.SevenZipFile(compressed_buf, mode='w') as archive:
+        #     archive.writestr(data,"tensor.pt")
+        #
+        # # 压缩字节流
+        # compressed_bytes = compressed_buf.getvalue()
+        # size_bytes = len(compressed_bytes)
+        # rates.append(size_bytes * 8 / N)
+
+        # cabac
+        # === 1. 准备数据 ===
+        # signs = (Coeff_enc < 0).flatten().int().tolist()
+        # magnitudes = Coeff_enc.flatten().abs().int().tolist()
+        #
+        # enc = cabac.cabacSimpleSequenceEncoder()
+        # enc.initCtx(1, 0.5, 8)
+        # enc.start()
+        #
+        # k = 1
+        # num_max_val = int(np.max(magnitudes))
+        # ctx_ids = np.zeros(num_max_val + 2, dtype=np.uint32)
+        # for m in magnitudes:
+        #     enc.encodeBinsEGk(m, k, ctx_ids)  # 编码幅度（非负整数）
+        #
+        # for s in signs:
+        #     enc.encodeBinsEP(s, 1)  # 编码符号（1 比特）
+        #
+        # enc.encodeBinTrm(1)
+        # enc.finish()
+        # enc.writeByteAlignment()
+        # compressed_bytes = enc.getBitstream()
+        # size_bytes = len(compressed_bytes)
+        # rates.append(size_bytes * 8 / N)
+        #
+        # # === 4. 解码验证 ===
+        # dec = cabac.cabacSimpleSequenceDecoder(compressed_bytes)
+        # dec.initCtx(1, 0.5, 8)
+        # dec.start()
+        #
+        # decoded_mags = [dec.decodeBinsEGk(k, ctx_ids) for _ in magnitudes]
+        # decoded_signs = [dec.decodeBinsEP(1) for _ in signs]
+        #
+        # recon = torch.tensor(
+        #     [(-1) ** s * m for s, m in zip(decoded_signs, decoded_mags)],
+        #     dtype=torch.int32
+        # )
 
     time_log[frame_idx] = time.time() - frame_start
     print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
     print("\t".join(map(str, rates)))
+
+    # Coeff_dec = [Y_list_dec,U_list_dec,V_list_dec]
+    # C_rec = iRAHT(Coeff, ListC, FlagsC, weightsC)
+    # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
 
 # ## ---------------------
 # ## Analysis, Plotting, and Saving

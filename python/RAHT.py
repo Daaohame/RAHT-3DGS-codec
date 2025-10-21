@@ -674,7 +674,7 @@ def RAHT2_optimized(C,
     """
     device = C.device
     N, D = C.shape
-    T = C.to(torch.float64).to(device)
+    T = C.clone().to(torch.float64).to(device)
     w = torch.ones((N, 1), dtype=torch.float64, device=device)
 
     def to0(idx: torch.Tensor) -> torch.Tensor:

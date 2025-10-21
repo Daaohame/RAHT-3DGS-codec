@@ -287,25 +287,25 @@ def RAHT_round_trip_test(C_original: torch.Tensor,
     Test round-trip accuracy: C -> RAHT -> inverse-RAHT -> C'
     Returns reconstruction error statistics
     """
-    from raht_pytorch import RAHT_optimized  # Import forward RAHT
-    
+    from RAHT import RAHT_optimized  # Import forward RAHT
+
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
-    
+
     # Forward transform
     T, w = RAHT_optimized(C_original, List, Flags, weights, device)
-    
+
     # Inverse transform
     C_reconstructed = inverse_RAHT_optimized(T, w, List, Flags, weights, device)
-    
+
     # Compute reconstruction error
     error = torch.abs(C_original - C_reconstructed)
     max_error = torch.max(error).item()
     mean_error = torch.mean(error).item()
     mse = torch.mean(error ** 2).item()
-    
+
     # Check if reconstruction is within tolerance
     is_perfect = max_error < tolerance
-    
+
     return {
         'max_error': max_error,
         'mean_error': mean_error,
@@ -317,28 +317,28 @@ def RAHT_round_trip_test(C_original: torch.Tensor,
     }
 
 
-def benchmark_inverse_raht_versions(T, w, List, Flags, weights, device='cuda', 
+def benchmark_inverse_raht_versions(T, w, List, Flags, weights, device='cuda',
                                    warmup_runs=5, benchmark_runs=10):
     """
     Benchmark different inverse RAHT implementations
     """
     import time
-    
+
     versions = {
         'optimized': inverse_RAHT_optimized,
         'batched': inverse_RAHT_batched,
         'fused': inverse_RAHT_fused_kernel
     }
-    
+
     results = {}
-    
+
     for name, func in versions.items():
         # Warmup
         for _ in range(warmup_runs):
             _ = func(T, w, List, Flags, weights, device)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-        
+
         # Benchmark
         times = []
         for _ in range(benchmark_runs):
@@ -348,15 +348,48 @@ def benchmark_inverse_raht_versions(T, w, List, Flags, weights, device='cuda',
                 torch.cuda.synchronize()
             end = time.perf_counter()
             times.append(end - start)
-        
+
         results[name] = {
             'mean_time': sum(times) / len(times),
             'min_time': min(times),
             'max_time': max(times)
         }
-    
+
     return results
 
+def iRAHT(Coeff: torch.Tensor, List, Flags, weights):
+    """
+    GPU/CPU compatible version of inverse RAHT transform.
+    """
+    device = Coeff.device
+
+    T = Coeff.clone().to(device)
+    Nlevels = len(Flags)
+
+    for j in range(Nlevels - 1, -1, -1):
+        left_sibling_index = Flags[j].to(device)
+        right_sibling_index = torch.cat([
+            torch.zeros(1, dtype=left_sibling_index.dtype, device=device),
+            left_sibling_index[:-1]
+        ])
+
+        i0 = List[j][left_sibling_index == 1].to(device)
+        i1 = List[j][right_sibling_index == 1].to(device)
+
+        x0 = T[i0, :]
+        x1 = T[i1, :]
+        signal_dimension = T.shape[1]
+
+        w0 = weights[j][left_sibling_index == 1].to(device)
+        w1 = weights[j][right_sibling_index == 1].to(device)
+
+        a = torch.sqrt(w0 / (w0 + w1)).unsqueeze(1).expand(-1, signal_dimension)
+        b = torch.sqrt(w1 / (w0 + w1)).unsqueeze(1).expand(-1, signal_dimension)
+
+        T[i0, :] = a * x0 - b * x1
+        T[i1, :] = b * x0 + a * x1
+
+    return T
 
 # Example usage and testing
 if __name__ == "__main__":
