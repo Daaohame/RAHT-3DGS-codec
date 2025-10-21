@@ -8,10 +8,10 @@ from data_util import get_pointcloud, get_pointcloud_n_frames
 from utils import rgb_to_yuv, save_mat, save_lists, block_indices, is_frame_morton_ordered, sanity_check_vector
 from RAHT import RAHT2, RAHT2_optimized
 from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param
+from RAHT_param import RAHT_param, RAHT_param_optimized
 import rlgr
 
-DEBUG = False
+DEBUG = True
 
 ## ---------------------
 ## Configuration
@@ -25,12 +25,9 @@ T = 1
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
-# colorStep = [1]
 nSteps = len(colorStep)
-bytes_log = torch.zeros((T, nSteps))
 MSE = torch.zeros((T, nSteps))
 Nvox = torch.zeros(T)
-time_log = torch.zeros(T)
 
 ## ---------------------
 ## Main Processing Loop
@@ -39,11 +36,11 @@ print(f"\nStarting processing for {T} frames...")
 
 for frame_idx in range(T):
     frame = frame_idx + 1   # 1-based indexing
-    frame_start = time.time()
 
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
+    V = V.to(torch.float64).to(device)
     Crgb = Crgb.to(torch.float64).to(device)
     C = rgb_to_yuv(Crgb)
     
@@ -123,44 +120,38 @@ for frame_idx in range(T):
 
         MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
 
-        # nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-        # nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-        # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
-        # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
-
         Y_list = [int(i) for i in Coeff_enc[order_RAHT, 0].tolist()] #order_RAHT order_RAGFT order_morton
         U_list = [int(i) for i in Coeff_enc[order_RAHT, 1].tolist()]
         V_list = [int(i) for i in Coeff_enc[order_RAHT, 2].tolist()]
         
         enc = rlgr.file(filename, 1)
         enc.rlgrWrite(Y_list, int(1))
-        enc.close()
-        dec = rlgr.file(filename, 0)
-        Y_list_dec = dec.rlgrRead(N, 1)
-        bytesY = os.path.getsize(filename)
-        dec.close()
-        
-        enc = rlgr.file(filename, 1)
         enc.rlgrWrite(U_list, int(1))
-        enc.close()
-        dec = rlgr.file(filename, 0)
-        U_list_dec = dec.rlgrRead(N, 1)
-        bytesU = os.path.getsize(filename)
-        dec.close()
-        
-        enc = rlgr.file(filename, 1)
         enc.rlgrWrite(V_list, int(1))
         enc.close()
-        dec = rlgr.file(filename, 0)
-        V_list_dec = dec.rlgrRead(N, 1)
-        bytesV = os.path.getsize(filename)
-        dec.close()
-        
-        size_bytes = bytesY + bytesU + bytesV
+        size_bytes = os.path.getsize(filename)
         rates.append(size_bytes * 8 / N)
 
-    time_log[frame_idx] = time.time() - frame_start
-    print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
+        dec = rlgr.file(filename, 0)
+        Y_list_dec = dec.rlgrRead(N, 1)
+        U_list_dec = dec.rlgrRead(N, 1)
+        V_list_dec = dec.rlgrRead(N, 1)
+        dec.close()
+        
+        # dequantization
+        Yq = torch.tensor(Y_list_dec, dtype=torch.int64, device=device)
+        Uq = torch.tensor(U_list_dec, dtype=torch.int64, device=device)
+        Vq = torch.tensor(V_list_dec, dtype=torch.int64, device=device)
+        Coeff_enc_dec = torch.empty((N, 3), dtype=torch.int64, device=device)
+        Coeff_enc_dec[order_RAHT, 0] = Yq
+        Coeff_enc_dec[order_RAHT, 1] = Uq
+        Coeff_enc_dec[order_RAHT, 2] = Vq
+        step = float(step)  # scalar
+        Coeff_hat = Coeff_enc_dec.to(torch.float64) * step  # shape [N,3]
+        
+        C_recon = inverse_RAHT(Coeff_hat, ListC, FlagsC, weightsC)
+    
+    print("rates (bpv): ", end="")
     print("\t".join(map(str, rates)))
 
 # ## ---------------------
