@@ -232,7 +232,7 @@ for frame_idx in range(T):
         # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
         
         # Log timing data as CSV row
-        logger.info(f"{frame},{i},{rate_bpp:.6f},{raht_param_time:.6f},{raht_transform_time:.6f},"
+        logger.info(f"{frame},{colorStep[i]},{rate_bpp:.6f},{raht_param_time:.6f},{raht_transform_time:.6f},"
                    f"{order_RAGFT_time:.6f},{quant_time:.6f},{entropy_enc_time:.6f},"
                    f"{entropy_dec_time:.6f},{dequant_time:.6f},{iRAHT_time:.6f}")
 
