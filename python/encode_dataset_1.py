@@ -8,7 +8,7 @@ from data_util import get_pointcloud, get_pointcloud_n_frames
 from utils import rgb_to_yuv, save_mat, save_lists, is_frame_morton_ordered, block_indices, sanity_check_vector
 from RAHT import RAHT2_optimized
 from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param, RAHT_param_reorder, RAHT_param_reorder_fast, RAHT_param_reorder_full_gpu
+from RAHT_param import RAHT_param, RAHT_param_reorder, RAHT_param_reorder_fast
 import rlgr
 
 DEBUG = False
