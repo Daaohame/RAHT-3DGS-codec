@@ -37,6 +37,7 @@ for frame =1:T
     Nvox(frame) = N;
     C = RGBtoYUV(Crgb); % shape [N x 3]
     
+    
     % ListC: indices of colors
     % FlagsC: indicator of whether a node is a left sibling to another node
     % weightsC: weights of colors
