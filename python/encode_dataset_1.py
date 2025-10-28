@@ -23,6 +23,8 @@ sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
+# colorStep = [2]
+# colorStep = [1,2]
 nSteps = len(colorStep)
 bytes_log = torch.zeros((T, nSteps))
 rates = torch.zeros((T, nSteps), dtype=torch.float64)
@@ -184,11 +186,15 @@ for frame_idx in range(T):
         dequant_time[frame_idx, i] = time.time() - dequant_time[frame_idx, i]
 
         iRAHT_time[frame_idx, i] = time.time()
-        order_RAGFT = torch.argsort(order_RAGFT)
-        Coeff_dec = Coeff_dec[order_RAGFT,:]
+        order_RAGFT_dec = torch.argsort(order_RAGFT)
+        Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
         C_rec = inverse_RAHT(Coeff_dec, ListC, FlagsC, weightsC)
         iRAHT_time[frame_idx, i] = time.time() - iRAHT_time[frame_idx, i]
         # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
+        # logger.info(
+        #     f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
+        #     f"{order_RAGFT_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
+        #     f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
 
     # Print timing information
     print(f"Frame {frame}")
@@ -205,10 +211,11 @@ for frame_idx in range(T):
     #                           dequant_time,iRAHT_time])))
 # Log timing data as CSV row
 for i in range(nSteps):
-    logger.info(f"{frame},{colorStep[i]},{torch.sum(rates[:, i])*8/torch.sum(Nvox):.6f},{torch.mean(raht_param_time[:, i]):.6f},{torch.mean(raht_transform_time[:, i]):.6f},"
+    logger.info(f"{frame},{colorStep[i]},{torch.sum(rates[:, i])*8/torch.sum(Nvox[:]):.6f},{torch.mean(raht_param_time[:, i]):.6f},{torch.mean(raht_transform_time[:, i]):.6f},"
                f"{torch.mean(order_RAGFT_time[:, i]):.6f},{torch.mean(quant_time[:, i]):.6f},{torch.mean(entropy_enc_time[:, i]):.6f},"
                f"{torch.mean(entropy_dec_time[:, i]):.6f},{torch.mean(dequant_time[:, i]):.6f},{torch.mean(iRAHT_time[:, i]):.6f},{torch.mean(psnr[:, i]):.6f}")
 os.remove(filename)
+
 # ## ---------------------
 # ## Analysis, Plotting, and Saving
 # ## ---------------------

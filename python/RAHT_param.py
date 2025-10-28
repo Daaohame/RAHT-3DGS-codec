@@ -89,7 +89,7 @@ def RAHT_param_reorder(
     width: float,
     depth: int,
     return_one_based: bool = False
-) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     """
     RAHT prelude with optional 0/1-based output.
     Defaults to 1-based to match MATLAB exactly.
