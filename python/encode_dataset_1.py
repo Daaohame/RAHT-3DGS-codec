@@ -58,18 +58,52 @@ logger.info("Frame,Quantization_Step,Rate_bpp,RAHT_prelude_time,RAHT_transform_t
 
 
 ## ---------------------
+## Precision Setup
+## ---------------------
+use_fp64 = True  # set True only if RAHT requires double precision
+DTYPE = torch.float64 if use_fp64 else torch.float32
+def to_dev(x):
+    return x.to(dtype=DTYPE, device=device, non_blocking=True)
+
+
+## One dummy iteration to warm up GPU
+print("Warming up GPU with a dummy iteration...")
+V_dummy, Crgb_dummy, J_dummy = get_pointcloud(dataset, sequence, 1, data_root)
+J_dummy = int(J_dummy) if not isinstance(J_dummy, int) else J_dummy
+Vw = V_dummy.to(dtype=DTYPE)  # CPU for param if RAHT_param is CPU-bound
+origin_dummy = torch.zeros(3, dtype=Vw.dtype, device=Vw.device)
+
+ListC_dummy, FlagsC_dummy, weightsC_dummy = RAHT_param(Vw, origin_dummy, 2**J_dummy, J_dummy)
+
+ListC_dummy = [t.to(device=device, non_blocking=True) for t in ListC_dummy]
+FlagsC_dummy = [t.to(device=device, non_blocking=True) for t in FlagsC_dummy]
+weightsC_dummy = [t.to(device=device, non_blocking=True) for t in weightsC_dummy]
+
+Crgb_dummy = Crgb_dummy.to(dtype=DTYPE)
+C_dummy = rgb_to_yuv(Crgb_dummy).contiguous()
+C_dummy = to_dev(C_dummy)
+
+# Run transform (warm-up kernels/caches)
+Coeff_dummy, w_dummy = RAHT2_optimized(C_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+
+# Cleanup
+del V_dummy, Crgb_dummy, J_dummy, Vw, origin_dummy
+del ListC_dummy, FlagsC_dummy, weightsC_dummy, C_dummy, Coeff_dummy, w_dummy
+
+
+## ---------------------
 ## Main Processing Loop
 ## ---------------------
 print(f"\nStarting processing for {T} frames...")
-
-for frame_idx in range(T):
+for frame_idx in range(1):
     frame = frame_idx + 1
 
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
     N = V.shape[0]
     Nvox[frame_idx] = N
-    Crgb = Crgb.to(torch.float64).to(device)
-    C = rgb_to_yuv(Crgb)
+    Cyuv = rgb_to_yuv(Crgb.to(dtype=DTYPE)).contiguous()
+    C = to_dev(Cyuv)
+    breakpoint()
 
     frame_start = time.time()
     origin = torch.tensor([0, 0, 0], dtype=V.dtype)
@@ -78,10 +112,10 @@ for frame_idx in range(T):
     ListC, FlagsC, weightsC, order_RAGFT = RAHT_param_reorder_fast(V, origin, 2 ** J, J)
     raht_param_time[frame_idx, :] = time.time() - raht_param_time[frame_idx, :]
 
-    ListC = [t.to(device) for t in ListC]
-    FlagsC = [t.to(device) for t in FlagsC]
-    weightsC = [t.to(device) for t in weightsC]
-    V = V.to(torch.float64).to(device)
+    ListC = [t.to(device=device, non_blocking=True) for t in ListC]
+    FlagsC = [t.to(device=device, non_blocking=True) for t in FlagsC]
+    weightsC = [t.to(device=device, non_blocking=True) for t in weightsC]
+    V = V.to(dtype=DTYPE).to(device)
 
     raht_transform_time[frame_idx, :] = time.time()
     Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
