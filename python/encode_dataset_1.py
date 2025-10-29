@@ -5,9 +5,9 @@ import os
 import logging
 
 from data_util import get_pointcloud, get_pointcloud_n_frames
-from utils import rgb_to_yuv, save_mat, save_lists, is_frame_morton_ordered, block_indices, sanity_check_vector
+from utils import rgb_to_yuv, save_mat, save_lists, sanity_check_vector
 from RAHT import RAHT2_optimized
-from iRAHT import inverse_RAHT
+from iRAHT import inverse_RAHT_optimized
 from RAHT_param import RAHT_param, RAHT_param_reorder, RAHT_param_reorder_fast
 import rlgr
 
@@ -17,14 +17,12 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 ## ---------------------
 ## Configuration
 ## ---------------------
-data_root = 'F:\\Desktop\\Motion_Vector_Database\\data'
+data_root = '/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/data'
 dataset = '8iVFBv2'
 sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
 
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
-# colorStep = [2]
-# colorStep = [1,2]
 nSteps = len(colorStep)
 bytes_log = torch.zeros((T, nSteps))
 rates = torch.zeros((T, nSteps), dtype=torch.float64)
@@ -95,7 +93,7 @@ del ListC_dummy, FlagsC_dummy, weightsC_dummy, C_dummy, Coeff_dummy, w_dummy
 ## Main Processing Loop
 ## ---------------------
 print(f"\nStarting processing for {T} frames...")
-for frame_idx in range(1):
+for frame_idx in range(T):
     frame = frame_idx + 1
 
     V, Crgb, J = get_pointcloud(dataset, sequence, frame, data_root)
@@ -103,43 +101,21 @@ for frame_idx in range(1):
     Nvox[frame_idx] = N
     Cyuv = rgb_to_yuv(Crgb.to(dtype=DTYPE)).contiguous()
     C = to_dev(Cyuv)
-    breakpoint()
+    V = V.to(dtype=DTYPE).to(device)
 
     frame_start = time.time()
-    origin = torch.tensor([0, 0, 0], dtype=V.dtype)
-    raht_param_time[frame_idx, :] = time.time()
-    # ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
+    origin = torch.tensor([0, 0, 0], dtype=V.dtype, device=device)
+    start_time = time.time()
     ListC, FlagsC, weightsC, order_RAGFT = RAHT_param_reorder_fast(V, origin, 2 ** J, J)
-    raht_param_time[frame_idx, :] = time.time() - raht_param_time[frame_idx, :]
+    raht_param_time[frame_idx, :] = time.time() - start_time
 
     ListC = [t.to(device=device, non_blocking=True) for t in ListC]
     FlagsC = [t.to(device=device, non_blocking=True) for t in FlagsC]
     weightsC = [t.to(device=device, non_blocking=True) for t in weightsC]
-    V = V.to(dtype=DTYPE).to(device)
-
-    raht_transform_time[frame_idx, :] = time.time()
+    
+    start_time = time.time()
     Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
-    raht_transform_time[frame_idx, :] = time.time() - raht_transform_time[frame_idx, :]
-
-    order_RAGFT_time[frame_idx, :] = time.time()
-    # error, V, index = is_frame_morton_ordered(V, J)
-    # ac_list = []
-    # dc_list = []
-    # indices = torch.arange(0, N)
-    # for i in range(J):
-    #     indices,indices_remain = block_indices(V[indices,:], 2**(i+1))
-    #     if i == 0:
-    #         ac_list.append(indices_remain)
-    #         dc_list.append(indices)
-    #     else:
-    #         indices = dc_list[i-1][indices]
-    #         indices_remain = dc_list[i-1][indices_remain]
-    #         ac_list.append(indices_remain)
-    #         dc_list.append(indices)
-    # ac_list.append(indices)
-    # ac_list = ac_list[::-1]
-    # order_RAGFT = torch.cat(ac_list)
-    order_RAGFT_time[frame_idx, :] = time.time() - order_RAGFT_time[frame_idx, :]
+    raht_transform_time[frame_idx, :] = time.time() - start_time
 
     if DEBUG:
         save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
@@ -149,7 +125,7 @@ for frame_idx in range(1):
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
         print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
+        C_recon = inverse_RAHT_optimized(Coeff, ListC, FlagsC, weightsC)
         print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
 
     # Sort weights in descending order
@@ -159,14 +135,12 @@ for frame_idx in range(1):
 
     # temporary filename for PyRLGR
     filename = "test.bin"
-    # rates = []
     # Loop through quantization steps
     for i in range(nSteps):
-        # print(i)
-        quant_time[frame_idx, i] = time.time()
         step = colorStep[i]
+        start_time = time.time()
         Coeff_enc = torch.floor(Coeff / step + 0.5)
-        quant_time[frame_idx, i] = time.time() - quant_time[frame_idx, i]
+        quant_time[frame_idx, i] = time.time() - start_time
         Y_hat = Coeff_enc[:, 0] * step
         MSE[frame_idx, i] = (torch.linalg.norm(Coeff[:,0] - Y_hat)**2) / (N * 255**2)
         psnr[frame_idx, i] = -10 * torch.log10(MSE[frame_idx, i])
@@ -215,40 +189,24 @@ for frame_idx in range(1):
                                           U_list_dec,
                                           V_list_dec], dim=0).T
 
-        dequant_time[frame_idx, i] = time.time()
+        start_time = time.time()
         Coeff_dec = Coeff_dec * step
-        dequant_time[frame_idx, i] = time.time() - dequant_time[frame_idx, i]
-
-        iRAHT_time[frame_idx, i] = time.time()
+        dequant_time[frame_idx, i] = time.time() - start_time
+        
+        start_time = time.time()
         order_RAGFT_dec = torch.argsort(order_RAGFT)
         Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
-        C_rec = inverse_RAHT(Coeff_dec, ListC, FlagsC, weightsC)
-        iRAHT_time[frame_idx, i] = time.time() - iRAHT_time[frame_idx, i]
+        C_rec = inverse_RAHT_optimized(Coeff_dec, ListC, FlagsC, weightsC)
+        iRAHT_time[frame_idx, i] = time.time() - start_time
         # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
-        # logger.info(
-        #     f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
-        #     f"{order_RAGFT_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
-        #     f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
+        
+        logger.info(
+            f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
+            f"{order_RAGFT_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
+            f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
 
-    # Print timing information
     print(f"Frame {frame}")
-    # print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s, "
-    #       f"RAHT_optimized={raht_transform_time:.6f}s, "
-    #       f"order_RAGFT_time={order_RAGFT_time:.6f}s, "
-    #       f"quant_time={quant_time:.6f}s, "
-    #       f"entropy_enc_time={entropy_enc_time:.6f}s, "
-    #       f"entropy_dec_time={entropy_dec_time:.6f}s, "
-    #       f"dequant_time={dequant_time:.6f}s, "
-    #       f"iRAHT_time={iRAHT_time:.6f}s, ")
-    # print("\t".join(map(str, rates)))
-    # print("\t".join(map(str, [raht_param_time,raht_transform_time,order_RAGFT_time,quant_time,entropy_enc_time,entropy_dec_time,
-    #                           dequant_time,iRAHT_time])))
-# Log timing data as CSV row
-for i in range(nSteps):
-    logger.info(f"{frame},{colorStep[i]},{torch.sum(rates[:, i])*8/torch.sum(Nvox[:]):.6f},{torch.mean(raht_param_time[:, i]):.6f},{torch.mean(raht_transform_time[:, i]):.6f},"
-               f"{torch.mean(order_RAGFT_time[:, i]):.6f},{torch.mean(quant_time[:, i]):.6f},{torch.mean(entropy_enc_time[:, i]):.6f},"
-               f"{torch.mean(entropy_dec_time[:, i]):.6f},{torch.mean(dequant_time[:, i]):.6f},{torch.mean(iRAHT_time[:, i]):.6f},{torch.mean(psnr[:, i]):.6f}")
-os.remove(filename)
+    os.remove(filename)
 
 # ## ---------------------
 # ## Analysis, Plotting, and Saving

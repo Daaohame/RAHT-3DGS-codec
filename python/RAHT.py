@@ -334,4 +334,3 @@ def RAHT2_optimized(C,
         T.scatter_(0, i1_.unsqueeze(1).expand(-1, D), T_i1)
 
     return T, w
-
