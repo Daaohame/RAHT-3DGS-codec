@@ -131,10 +131,7 @@ for frame_idx in range(T):
     # Sort weights in descending order
     # values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
     # order_morton = torch.arange(0,V.shape[0])
-    # Y = Coeff[:, 0]
 
-    # temporary filename for PyRLGR
-    filename = "test.bin"
     # Loop through quantization steps
     for i in range(nSteps):
         step = colorStep[i]
@@ -149,45 +146,43 @@ for frame_idx in range(T):
         Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
 
         Y_list = [int(i) for i in Coeff_enc[order_RAGFT, 0].tolist()]
-        enc = rlgr.file(filename, 1)
-        entropy_enc_Y_time = enc.rlgrWrite(Y_list, int(1))
-        enc.close()
-        dec = rlgr.file(filename, 0)
-        entropy_dec_Y_time, Y_list_dec = dec.rlgrRead(N, 1)
-        bytesY = os.path.getsize(filename)
-        dec.close()
-        Y_list_dec = torch.tensor(Y_list_dec).to(device=device, dtype=torch.float64)
-        
         U_list = [int(i) for i in Coeff_enc[order_RAGFT, 1].tolist()]
-        enc = rlgr.file(filename, 1)
-        entropy_enc_U_time = enc.rlgrWrite(U_list, int(1))
-        enc.close()
-        dec = rlgr.file(filename, 0)
-        entropy_dec_U_time, U_list_dec = dec.rlgrRead(N, 1)
-        bytesU = os.path.getsize(filename)
-        dec.close()
-        U_list_dec = torch.tensor(U_list_dec).to(device=device, dtype=torch.float64)
-        
         V_list = [int(i) for i in Coeff_enc[order_RAGFT, 2].tolist()]
-        enc = rlgr.file(filename, 1)
-        entropy_enc_V_time = enc.rlgrWrite(V_list, int(1))
-        enc.close()
-        dec = rlgr.file(filename, 0)
-        entropy_dec_V_time, V_list_dec = dec.rlgrRead(N, 1)
-        bytesV = os.path.getsize(filename)
-        dec.close()
-        V_list_dec = torch.tensor(V_list_dec).to(device=device, dtype=torch.float64)
 
-        size_bytes = bytesY + bytesU + bytesV
-        # rate_bpp = size_bytes * 8 / N
+        channels = {"Y": Y_list, "U": U_list, "V": V_list}
+        flag_signed = 1  # 1 => signed integers
+        compressed = {}     # name -> {"buf": list[uint8], "time_ns": int}
+        decoded = {}        # name -> {"out": list[int], "time_ns": int}
+
+        # encode
+        for name, data in channels.items():
+            m_write = rlgr.membuf()                 # write buffer
+            encode_time_ns = m_write.rlgrWrite(data, flag_signed)
+            m_write.close()
+            buf = m_write.get_buffer()              # list[uint8] (bytes-like)
+            compressed[name] = {"buf": buf, "time_ns": encode_time_ns}
+            # print(f"{name}: wrote {len(buf)} bytes in {encode_time_ns} ns")
+        
+        # decode
+        for name, original in channels.items():
+            original_len = len(data)
+            m_read = rlgr.membuf(compressed[name]["buf"])
+            decode_time_ns, out = m_read.rlgrRead(original_len, flag_signed)
+            m_read.close()
+            assert len(out) == original_len, f"Length mismatch for {name}: {len(out)} != {original_len}"
+            decoded[name] = {"out": out, "time_ns": decode_time_ns}
+            # print(f"{name}: read {len(out)} elems in {decode_time_ns} ns")
+        
+        size_bytes = sum(len(b['buf']) for b in compressed.values())
         rates[frame_idx, i] = size_bytes
+        entropy_enc_time[frame_idx, i] = sum(b["time_ns"] for b in compressed.values()) / 1e9
+        entropy_dec_time[frame_idx, i] = sum(b["time_ns"] for b in decoded.values()) / 1e9
+        
+        Y_list_dec = torch.tensor(decoded["Y"]["out"], dtype=DTYPE, device=device)
+        U_list_dec = torch.tensor(decoded["U"]["out"], dtype=DTYPE, device=device)
+        V_list_dec = torch.tensor(decoded["V"]["out"], dtype=DTYPE, device=device)
 
-        entropy_enc_time[frame_idx, i] = (entropy_enc_Y_time + entropy_enc_U_time + entropy_enc_V_time) / 1e9
-        entropy_dec_time[frame_idx, i] = (entropy_dec_Y_time + entropy_dec_U_time + entropy_dec_V_time) / 1e9
-
-        Coeff_dec = tensor = torch.stack([Y_list_dec,
-                                          U_list_dec,
-                                          V_list_dec], dim=0).T
+        Coeff_dec = torch.stack([Y_list_dec, U_list_dec, V_list_dec], dim=0).T
 
         start_time = time.time()
         Coeff_dec = Coeff_dec * step
@@ -206,7 +201,6 @@ for frame_idx in range(T):
             f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
 
     print(f"Frame {frame}")
-    os.remove(filename)
 
 # ## ---------------------
 # ## Analysis, Plotting, and Saving
