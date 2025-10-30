@@ -1,5 +1,5 @@
 set(source_files
-        file.cpp
+        membuf.cpp
 )
 
 add_library(rlgr_internal ${source_files})
