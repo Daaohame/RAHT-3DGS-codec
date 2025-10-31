@@ -256,7 +256,6 @@ void membuf::grWrite(uint64_t data, uint_least8_t bits)
 }
 
 std::chrono::nanoseconds membuf::rlgrRead(int64_t *seq, size_t N, uint_least8_t flagSigned) {
-    auto total_duration = std::chrono::nanoseconds(0);
     auto start_time = std::chrono::high_resolution_clock::now();
 
     uint64_t u;
@@ -276,32 +275,20 @@ std::chrono::nanoseconds membuf::rlgrRead(int64_t *seq, size_t N, uint_least8_t 
             // "Run" mode
             m = 0;
             
-            auto end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             while (this->read()) {
-            start_time = std::chrono::high_resolution_clock::now();
                 m += 0x1 << k;
                 k_P += U1;
                 k = k_P / L;
-            end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             }
-            start_time = std::chrono::high_resolution_clock::now();
             
-            end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             m += this->read(k);
-            start_time = std::chrono::high_resolution_clock::now();
             
             while (m--)
                 seq[n++] = 0;
             if (n >= N)
                 break;
 
-            end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             u = this->grRead(k_R);
-            start_time = std::chrono::high_resolution_clock::now();
 
             seq[n++] = flagSigned ? _u2s(u + 1) : u + 1;
             p = u >> k_R;
@@ -322,10 +309,7 @@ std::chrono::nanoseconds membuf::rlgrRead(int64_t *seq, size_t N, uint_least8_t 
                 k_P -= D1;
         } else {
             // "No run" mode
-            auto end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             u = this->grRead(k_R);
-            start_time = std::chrono::high_resolution_clock::now();
             
             seq[n++] = flagSigned ? _u2s(u) : u;
             p = u >> k_R;
@@ -348,14 +332,12 @@ std::chrono::nanoseconds membuf::rlgrRead(int64_t *seq, size_t N, uint_least8_t 
                 k_P += U0;
         }
     }
+
     auto final_end_time = std::chrono::high_resolution_clock::now();
-    total_duration += final_end_time - start_time;
-    return total_duration;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(final_end_time - start_time);
 }
 
-
 std::chrono::nanoseconds membuf::rlgrWrite(int64_t *seq, size_t N, uint_least8_t flagSigned) {
-    auto total_duration = std::chrono::nanoseconds(0);
     auto start_time = std::chrono::high_resolution_clock::now();
 
     uint64_t u = 0;
@@ -376,12 +358,9 @@ std::chrono::nanoseconds membuf::rlgrWrite(int64_t *seq, size_t N, uint_least8_t
             if (u) {
                 u--;
 
-                auto end_time = std::chrono::high_resolution_clock::now();
-                total_duration += end_time - start_time;
                 this->write(0);
                 this->write(m, k);
                 this->grWrite(u, k_R);
-                start_time = std::chrono::high_resolution_clock::now();
 
                 p = u >> k_R;
                 if (p) {
@@ -402,21 +381,15 @@ std::chrono::nanoseconds membuf::rlgrWrite(int64_t *seq, size_t N, uint_least8_t
             } else {
                 m++;
                 if (m == (0x1 << k)) {
-                    auto end_time = std::chrono::high_resolution_clock::now();
-                    total_duration += end_time - start_time;
                     this->write(1);
-                    start_time = std::chrono::high_resolution_clock::now();
-
+                    
                     k_P += U1;
                     m = 0;
                 }
             }
         } else {
             // "No run" mode
-            auto end_time = std::chrono::high_resolution_clock::now();
-            total_duration += end_time - start_time;
             this->grWrite(u, k_R);
-            start_time = std::chrono::high_resolution_clock::now();
 
             p = u >> k_R;
             if (p) {
@@ -441,14 +414,10 @@ std::chrono::nanoseconds membuf::rlgrWrite(int64_t *seq, size_t N, uint_least8_t
     }
 
     if (k && !u) {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        total_duration += end_time - start_time;
         this->write(0);
         this->write(m, k_P / L);
-        start_time = std::chrono::high_resolution_clock::now();
     }
     
     auto final_end_time = std::chrono::high_resolution_clock::now();
-    total_duration += final_end_time - start_time;
-    return total_duration;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(final_end_time - start_time);
 }
