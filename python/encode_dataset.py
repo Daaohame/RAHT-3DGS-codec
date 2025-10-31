@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import time
-import os
 import logging
 
 from data_util import get_pointcloud, get_pointcloud_n_frames
@@ -11,6 +10,11 @@ from iRAHT import inverse_RAHT_optimized
 from RAHT_param import RAHT_param, RAHT_param_reorder_fast
 import rlgr
 
+
+## ---------------------
+## Configuration
+## ---------------------
+torch.backends.cudnn.benchmark=False # for benchmarking
 DEBUG = False
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 raht_fn = {
@@ -19,17 +23,14 @@ raht_fn = {
     "RAHT_param": RAHT_param_reorder_fast
 }
 
-## ---------------------
-## Configuration
-## ---------------------
 data_root = '/ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/data'
 dataset = '8iVFBv2'
 sequence = 'redandblack'
 T = get_pointcloud_n_frames(dataset, sequence)
-
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
+
+
 nSteps = len(colorStep)
-bytes_log = torch.zeros((T, nSteps))
 rates = torch.zeros((T, nSteps), dtype=torch.float64)
 raht_param_time = torch.zeros((T, nSteps), dtype=torch.float64)
 raht_transform_time = torch.zeros((T, nSteps), dtype=torch.float64)
@@ -42,7 +43,6 @@ iRAHT_time = torch.zeros((T, nSteps), dtype=torch.float64)
 MSE = torch.zeros((T, nSteps), dtype=torch.float64)
 psnr = torch.zeros((T, nSteps), dtype=torch.float64)
 Nvox = torch.zeros(T)
-time_log = torch.zeros(T)
 
 
 ## ---------------------
@@ -89,9 +89,9 @@ C_dummy = to_dev(C_dummy)
 # Run transform (warm-up kernels/caches)
 Coeff_dummy, w_dummy = raht_fn["RAHT"](C_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
 order_RAGFT_dec_dummy = torch.argsort(order_RAGFT_dummy)
-Coeff_enc = torch.floor(Coeff_dummy / 10.5)
-Coeff_dec = Coeff_enc[order_RAGFT_dec_dummy,:]
-C_rec = raht_fn["iRAHT"](Coeff_dec, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+Coeff_enc_dummy = torch.floor(Coeff_dummy / 10.5)
+Coeff_dec_dummy = Coeff_enc_dummy[order_RAGFT_dec_dummy,:]
+C_rec = raht_fn["iRAHT"](Coeff_dec_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
 
 # Cleanup
 del V_dummy, Crgb_dummy, J_dummy, Vw, origin_dummy
@@ -150,14 +150,17 @@ for frame_idx in range(T):
         Y_hat = Coeff_enc[:, 0] * step
         MSE[frame_idx, i] = (torch.linalg.norm(Coeff[:,0] - Y_hat)**2) / (N * 255**2)
         psnr[frame_idx, i] = -10 * torch.log10(MSE[frame_idx, i])
+        # Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
+        
+        # get reoredered coefficients
+        coeff_reordered = Coeff_enc.index_select(0, order_RAGFT)
+        coeff_cpu_i32 = coeff_reordered.to('cpu', dtype=torch.int32, non_blocking=True)
+        np_coeff = coeff_cpu_i32.numpy()                        # zero-copy view on CPU
+        Y_list = np_coeff[:, 0].tolist()
+        U_list = np_coeff[:, 1].tolist()
+        V_list = np_coeff[:, 2].tolist()
 
-        # RLGR
-        Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
-
-        Y_list = [int(i) for i in Coeff_enc[order_RAGFT, 0].tolist()]
-        U_list = [int(i) for i in Coeff_enc[order_RAGFT, 1].tolist()]
-        V_list = [int(i) for i in Coeff_enc[order_RAGFT, 2].tolist()]
-
+        # RLGR settings
         channels = {"Y": Y_list, "U": U_list, "V": V_list}
         flag_signed = 1  # 1 => signed integers
         compressed = {}     # name -> {"buf": list[uint8], "time_ns": int}
@@ -174,7 +177,7 @@ for frame_idx in range(T):
         
         # decode
         for name, original in channels.items():
-            original_len = len(data)
+            original_len = len(original)
             m_read = rlgr.membuf(compressed[name]["buf"])
             decode_time_ns, out = m_read.rlgrRead(original_len, flag_signed)
             m_read.close()
@@ -187,11 +190,11 @@ for frame_idx in range(T):
         entropy_enc_time[frame_idx, i] = sum(b["time_ns"] for b in compressed.values()) / 1e9
         entropy_dec_time[frame_idx, i] = sum(b["time_ns"] for b in decoded.values()) / 1e9
         
-        Y_list_dec = torch.tensor(decoded["Y"]["out"], dtype=DTYPE, device=device)
-        U_list_dec = torch.tensor(decoded["U"]["out"], dtype=DTYPE, device=device)
-        V_list_dec = torch.tensor(decoded["V"]["out"], dtype=DTYPE, device=device)
-
-        Coeff_dec = torch.stack([Y_list_dec, U_list_dec, V_list_dec], dim=0).T
+        coeff_dec_cpu = np.stack(
+            (decoded["Y"]["out"], decoded["U"]["out"], decoded["V"]["out"]),
+            axis=1
+        ).astype(np.int32, copy=False)
+        Coeff_dec = torch.from_numpy(coeff_dec_cpu).pin_memory().to(device=device, dtype=DTYPE, non_blocking=True)
 
         start_time = time.time()
         Coeff_dec = Coeff_dec * step
