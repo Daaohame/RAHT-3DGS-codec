@@ -8,11 +8,16 @@ from data_util import get_pointcloud, get_pointcloud_n_frames
 from utils import rgb_to_yuv, save_mat, save_lists, sanity_check_vector
 from RAHT import RAHT2_optimized
 from iRAHT import inverse_RAHT_optimized
-from RAHT_param import RAHT_param, RAHT_param_reorder, RAHT_param_reorder_fast
+from RAHT_param import RAHT_param, RAHT_param_reorder_fast
 import rlgr
 
 DEBUG = False
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+raht_fn = {
+    "RAHT": RAHT2_optimized,
+    "iRAHT": inverse_RAHT_optimized,
+    "RAHT_param": RAHT_param_reorder_fast
+}
 
 ## ---------------------
 ## Configuration
@@ -68,10 +73,10 @@ def to_dev(x):
 print("Warming up GPU with a dummy iteration...")
 V_dummy, Crgb_dummy, J_dummy = get_pointcloud(dataset, sequence, 1, data_root)
 J_dummy = int(J_dummy) if not isinstance(J_dummy, int) else J_dummy
-Vw = V_dummy.to(dtype=DTYPE)  # CPU for param if RAHT_param is CPU-bound
+Vw = V_dummy.to(dtype=DTYPE).to(device)
 origin_dummy = torch.zeros(3, dtype=Vw.dtype, device=Vw.device)
 
-ListC_dummy, FlagsC_dummy, weightsC_dummy = RAHT_param(Vw, origin_dummy, 2**J_dummy, J_dummy)
+ListC_dummy, FlagsC_dummy, weightsC_dummy, order_RAGFT_dummy = raht_fn["RAHT_param"](Vw, origin_dummy, 2**J_dummy, J_dummy)
 
 ListC_dummy = [t.to(device=device, non_blocking=True) for t in ListC_dummy]
 FlagsC_dummy = [t.to(device=device, non_blocking=True) for t in FlagsC_dummy]
@@ -82,7 +87,11 @@ C_dummy = rgb_to_yuv(Crgb_dummy).contiguous()
 C_dummy = to_dev(C_dummy)
 
 # Run transform (warm-up kernels/caches)
-Coeff_dummy, w_dummy = RAHT2_optimized(C_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+Coeff_dummy, w_dummy = raht_fn["RAHT"](C_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+order_RAGFT_dec_dummy = torch.argsort(order_RAGFT_dummy)
+Coeff_enc = torch.floor(Coeff_dummy / 10.5)
+Coeff_dec = Coeff_enc[order_RAGFT_dec_dummy,:]
+C_rec = raht_fn["iRAHT"](Coeff_dec, ListC_dummy, FlagsC_dummy, weightsC_dummy)
 
 # Cleanup
 del V_dummy, Crgb_dummy, J_dummy, Vw, origin_dummy
@@ -106,7 +115,7 @@ for frame_idx in range(T):
     frame_start = time.time()
     origin = torch.tensor([0, 0, 0], dtype=V.dtype, device=device)
     start_time = time.time()
-    ListC, FlagsC, weightsC, order_RAGFT = RAHT_param_reorder_fast(V, origin, 2 ** J, J)
+    ListC, FlagsC, weightsC, order_RAGFT = raht_fn["RAHT_param"](V, origin, 2 ** J, J)
     raht_param_time[frame_idx, :] = time.time() - start_time
 
     ListC = [t.to(device=device, non_blocking=True) for t in ListC]
@@ -114,7 +123,7 @@ for frame_idx in range(T):
     weightsC = [t.to(device=device, non_blocking=True) for t in weightsC]
     
     start_time = time.time()
-    Coeff, w = RAHT2_optimized(C, ListC, FlagsC, weightsC)
+    Coeff, w = raht_fn["RAHT"](C, ListC, FlagsC, weightsC)
     raht_transform_time[frame_idx, :] = time.time() - start_time
 
     if DEBUG:
@@ -191,7 +200,7 @@ for frame_idx in range(T):
         start_time = time.time()
         order_RAGFT_dec = torch.argsort(order_RAGFT)
         Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
-        C_rec = inverse_RAHT_optimized(Coeff_dec, ListC, FlagsC, weightsC)
+        C_rec = raht_fn["iRAHT"](Coeff_dec, ListC, FlagsC, weightsC)
         iRAHT_time[frame_idx, i] = time.time() - start_time
         # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
         
@@ -202,39 +211,3 @@ for frame_idx in range(T):
 
     print(f"Frame {frame}")
 
-# ## ---------------------
-# ## Analysis, Plotting, and Saving
-# ## ---------------------
-# print("Analyzing results...")
-
-# # Calculate PSNR from the mean MSE across all frames for each quantization step
-# psnr = -10 * torch.log10(torch.mean(MSE, dim=0))
-
-# # Calculate bits per voxel (bpv)
-# total_bytes_per_step = torch.sum(bytes_log, dim=0)
-# total_voxels = torch.sum(Nvox)
-# bpv = 8 * total_bytes_per_step / total_voxels
-
-# # --- Plotting ---
-# plt.figure(figsize=(8, 6))
-# plt.plot(bpv.numpy(), psnr.numpy(), 'b-x', label='O3D Load + RAHT Sim')
-# plt.xlabel('Bits per Voxel (bpv)')
-# plt.ylabel('Y-PSNR (dB)')
-# plt.title('Rate-Distortion Curve')
-# plt.grid(True)
-# plt.legend()
-# plt.show()
-
-# # --- Saving ---
-# sequence_name = "test_sequence"
-# folder = f'RA-GFT/results/{sequence_name}/'
-# os.makedirs(folder, exist_ok=True)
-# filename = os.path.join(folder, f'{sequence_name}_RAHT.mat')
-# print(f"Saving results to {filename}...")
-# data_to_save = {
-#     'MSE': MSE.numpy(),
-#     'bytes': bytes_log.numpy(),
-#     'Nvox': Nvox.numpy(),
-#     'colorStep': np.array(colorStep)
-# }
-# savemat(filename, data_to_save)
