@@ -13,6 +13,9 @@ def get_morton_code(V: torch.Tensor, J: int) -> torch.Tensor:
     """
     Compute Morton codes (Z-order curve) for integer coordinates.
 
+    More efficient implementation using bitwise operations.
+    Based on RAHT_param.py implementation.
+
     Args:
         V: Tensor of shape (N, 3) with integer coordinates (x, y, z)
         J: Octree depth (number of bits per dimension)
@@ -24,24 +27,23 @@ def get_morton_code(V: torch.Tensor, J: int) -> torch.Tensor:
     device = V.device
 
     # Initialize Morton codes
-    M = torch.zeros(N, dtype=torch.int64, device=device)
-
-    # Bit weights for x, y, z: [1, 2, 4]
-    tt = torch.tensor([1, 2, 4], dtype=torch.int64, device=device)
+    MC = torch.zeros(N, dtype=torch.int64, device=device)
 
     # Interleave bits from least significant to most significant
-    for i in range(J):
-        # Extract i-th bit from each coordinate (z, y, x order for fliplr)
-        bits = torch.stack([
-            (V[:, 2] >> i) & 1,  # z bit
-            (V[:, 1] >> i) & 1,  # y bit
-            (V[:, 0] >> i) & 1   # x bit
-        ], dim=1)
+    for i in range(1, J + 1):
+        # Extract (i-1)-th bit from each coordinate
+        b = (V >> (i - 1)) & 1  # (N, 3) {0, 1}
 
-        # Add interleaved bits to Morton code
-        M = M + (bits * tt.unsqueeze(0)).sum(dim=1) * (8 ** i)
+        # Interleave bits: z (LSB), y (middle), x (MSB)
+        # digit = z + 2*y + 4*x
+        digit = (b[:, 2].to(torch.int64)
+                 + (b[:, 1].to(torch.int64) << 1)
+                 + (b[:, 0].to(torch.int64) << 2))
 
-    return M
+        # Set the 3-bit digit at position (i-1) in the Morton code
+        MC |= (digit << (3 * (i - 1)))
+
+    return MC
 
 
 def voxelize_pc(
@@ -121,18 +123,29 @@ def voxelize_pc(
 
     Nvox = len(voxel_indices)
 
-    # Voxelize attributes (average within each voxel)
+    # Voxelize attributes (average within each voxel) - VECTORIZED
     if has_attribute:
-        C0_voxelized = torch.zeros_like(C0)
+        # Compute points per voxel
+        voxel_counts_int = torch.diff(
+            torch.cat([voxel_indices, torch.tensor([N], device=device)])
+        )
 
-        for i in range(Nvox):
-            start_ind = voxel_indices[i]
-            end_ind = voxel_indices[i + 1] if i < Nvox - 1 else N
+        # Create voxel_id using repeat_interleave (GPU-parallelized)
+        voxel_id = torch.repeat_interleave(
+            torch.arange(Nvox, device=device),
+            voxel_counts_int
+        )
 
-            # Average attributes in this voxel
-            cmean = C0[start_ind:end_ind].mean(dim=0, keepdim=True)
-            C0_voxelized[start_ind:end_ind] = cmean
+        # Sum attributes per voxel using scatter_add
+        C_sum = torch.zeros(Nvox, C0.shape[1], device=device)
+        C_sum.scatter_add_(0, voxel_id.unsqueeze(1).expand(-1, C0.shape[1]), C0)
 
+        # Average attributes
+        voxel_counts = voxel_counts_int.float()
+        Cvox_mean = C_sum / voxel_counts.unsqueeze(1)
+
+        # Broadcast averaged attributes back to all points
+        C0_voxelized = Cvox_mean[voxel_id]
         DeltaC = C0 - C0_voxelized
 
         # Create voxelized point cloud (one point per voxel)
@@ -212,16 +225,20 @@ def voxelize_pc_batched(
 
     if has_attribute:
         # Use scatter_add for efficient averaging
-        # Assign each point to its voxel
-        voxel_id = torch.zeros(N, dtype=torch.long, device=device)
-        for i in range(Nvox):
-            start_ind = voxel_indices[i]
-            end_ind = voxel_indices[i + 1] if i < Nvox - 1 else N
-            voxel_id[start_ind:end_ind] = i
+        # Assign each point to its voxel - VECTORIZED (no Python loop!)
+        # Compute points per voxel from voxel_indices differences
+        voxel_counts_int = torch.diff(
+            torch.cat([voxel_indices, torch.tensor([N], device=device)])
+        )
 
-        # Count points per voxel
-        voxel_counts = torch.zeros(Nvox, dtype=torch.float32, device=device)
-        voxel_counts.scatter_add_(0, voxel_id, torch.ones(N, device=device))
+        # Create voxel_id using repeat_interleave (fully GPU-parallelized)
+        voxel_id = torch.repeat_interleave(
+            torch.arange(Nvox, device=device),
+            voxel_counts_int
+        )
+
+        # Convert counts to float for averaging
+        voxel_counts = voxel_counts_int.float()
 
         # Sum attributes per voxel
         C_sum = torch.zeros(Nvox, C0.shape[1], device=device)

@@ -149,6 +149,19 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
     print(f"Testing cluster merging (weight_by_opacity={weight_by_opacity})...")
     print("=" * 80)
 
+    # Warmup to avoid CUDA JIT compilation overhead
+    print(f"  Warming up CUDA kernels...")
+    for _ in range(3):
+        _ = merge_gaussian_clusters(
+            params['means'],
+            params['quats'],
+            params['scales'],
+            params['opacities'],
+            params['colors'],
+            cluster_labels,
+            weight_by_opacity=weight_by_opacity
+        )
+
     torch.cuda.synchronize()
     start_time = time.time()
 
@@ -197,6 +210,12 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
     # Create point cloud tensor [N, 3+d] where d is color dimension
     pc_data = torch.cat([merged_means, pc_colors], dim=1)
 
+    # Warmup to avoid CUDA JIT compilation overhead
+    print("\n  Warming up CUDA kernels...")
+    for _ in range(3):
+        voxelize_pc_batched(pc_data, J=8, device='cuda')
+        voxelize_pc_batched(pc_data, J=10, device='cuda')
+
     # Test with different octree depths
     for J in [8, 10]:
         print(f"\n  Testing with octree depth J={J}:")
@@ -219,7 +238,11 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
         print(f"    Voxel size: {voxel_info['voxel_size']:.6f}")
         print(f"    Compression ratio: {voxel_info['N'] / voxel_info['Nvox']:.2f}x")
         print(f"    PCvox shape: {PCvox.shape}")
+        print(f"      ↳ [Nvox, 6] = [{voxel_info['Nvox']}, 3 xyz coords + 3 RGB colors]")
+        print(f"      ↳ One row per unique voxel with averaged attributes")
         print(f"    DeltaPC shape: {DeltaPC.shape}")
+        print(f"      ↳ [N, 6] = [{voxel_info['N']}, 3 xyz deltas + 3 RGB deltas]")
+        print(f"      ↳ Quantization error for each original point")
 
     # Verify results
     print(f"\n" + "=" * 80)
