@@ -1,146 +1,214 @@
 import torch
 import numpy as np
 import time
-import matplotlib.pyplot as plt
-from scipy.io import loadmat
+import logging
 
 from data_util import read_ply_file
-from utils import save_mat, save_lists, sanity_check_vector
-from RAHT import RAHT2, RAHT2_optimized, RAHT_batched
-from iRAHT import inverse_RAHT
-from RAHT_param import RAHT_param
+from utils import rgb_to_yuv, save_mat, save_lists, sanity_check_vector
+from RAHT import RAHT2_optimized
+from iRAHT import inverse_RAHT_optimized
+from RAHT_param import RAHT_param, RAHT_param_reorder_fast
 import rlgr
 
-VARIANTS = {
-    "RAHT":             lambda C,L,F,W,d: RAHT2(C, L, F, W, d),
-    "RAHT_optimized":   lambda C,L,F,W,d: RAHT2_optimized(C, L, F, W, d),
-    "RAHT_batched":     lambda C,L,F,W,d: RAHT_batched(C, L, F, W, d),
-}
-
-DEBUG = True
 
 ## ---------------------
 ## Configuration
 ## ---------------------
-ply_list = ['C:\\Users\\hhrho\\Downloads\\train_dc.ply']
+torch.backends.cudnn.benchmark=False # for benchmarking
+DEBUG = False
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+raht_fn = {
+    "RAHT": RAHT2_optimized,
+    "iRAHT": inverse_RAHT_optimized,
+    "RAHT_param": RAHT_param_reorder_fast
+}
+
+ply_list = ['/ssd1/haodongw/workspace/3dstream/3DGS_Compression_Adaptive_Voxelization/attributes_compressed/train_depth_15_thr_30_3DGS_adapt_lossless/train_opacity.ply']
 J = 18
 T = len(ply_list)
-
-device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
-
 colorStep = [1, 2, 4, 6, 8, 12, 16, 20, 24, 32, 64]
+
 nSteps = len(colorStep)
-bytes_log = torch.zeros((T, nSteps))
-MSE = torch.zeros((T, nSteps))
+rates = torch.zeros((T, nSteps), dtype=torch.float64)
+raht_param_time = torch.zeros((T, nSteps), dtype=torch.float64)
+raht_transform_time = torch.zeros((T, nSteps), dtype=torch.float64)
+order_RAGFT_time = torch.zeros((T, nSteps), dtype=torch.float64)
+quant_time = torch.zeros((T, nSteps), dtype=torch.float64)
+entropy_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)
+entropy_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)
+dequant_time = torch.zeros((T, nSteps), dtype=torch.float64)
+iRAHT_time = torch.zeros((T, nSteps), dtype=torch.float64)
+MSE = torch.zeros((T, nSteps), dtype=torch.float64)
+psnr = torch.zeros((T, nSteps), dtype=torch.float64)
 Nvox = torch.zeros(T)
-time_log = torch.zeros(T)
+
+
+## ---------------------
+## Logging setup
+## ---------------------
+log_filename = f'../results/runtime_ply.csv'
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    handlers=[
+        logging.FileHandler(log_filename, mode='w')
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("Frame,Quantization_Step,Rate_bpp,RAHT_prelude_time,RAHT_transform_time,order_RAGFT_time,Quant_time,Entropy_enc_time,Entropy_dec_time,Dequant_time,iRAHT_time,psnr")
+
+
+## ---------------------
+## Precision Setup
+## ---------------------
+use_fp64 = True  # set True only if RAHT requires double precision
+DTYPE = torch.float64 if use_fp64 else torch.float32
+def to_dev(x):
+    return x.to(dtype=DTYPE, device=device, non_blocking=True)
+
+
+## One dummy iteration to warm up GPU
+print("Warming up GPU with a dummy iteration...")
+V_dummy, Crgb_dummy = read_ply_file(ply_list[0])
+J_dummy = J
+Vw = V_dummy.to(dtype=DTYPE).to(device)
+origin_dummy = torch.zeros(3, dtype=Vw.dtype, device=Vw.device)
+
+ListC_dummy, FlagsC_dummy, weightsC_dummy, order_RAGFT_dummy = raht_fn["RAHT_param"](Vw, origin_dummy, 2**J_dummy, J_dummy)
+
+ListC_dummy = [t.to(device=device, non_blocking=True) for t in ListC_dummy]
+FlagsC_dummy = [t.to(device=device, non_blocking=True) for t in FlagsC_dummy]
+weightsC_dummy = [t.to(device=device, non_blocking=True) for t in weightsC_dummy]
+
+Crgb_dummy = Crgb_dummy.to(dtype=DTYPE)
+C_dummy = rgb_to_yuv(Crgb_dummy).contiguous()
+C_dummy = to_dev(C_dummy)
+
+# Run transform (warm-up kernels/caches)
+Coeff_dummy, w_dummy = raht_fn["RAHT"](C_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+order_RAGFT_dec_dummy = torch.argsort(order_RAGFT_dummy)
+Coeff_enc_dummy = torch.floor(Coeff_dummy / 10.5)
+Coeff_dec_dummy = Coeff_enc_dummy[order_RAGFT_dec_dummy,:]
+C_rec = raht_fn["iRAHT"](Coeff_dec_dummy, ListC_dummy, FlagsC_dummy, weightsC_dummy)
+
+# Cleanup
+del V_dummy, Crgb_dummy, J_dummy, Vw, origin_dummy
+del ListC_dummy, FlagsC_dummy, weightsC_dummy, C_dummy, Coeff_dummy, w_dummy
+
 
 ## ---------------------
 ## Main Processing Loop
 ## ---------------------
+print(f"\nStarting processing for {T} frames...")
 for frame_idx in range(T):
     frame = frame_idx + 1
-    frame_start = time.time()
-    
+
     V, Crgb = read_ply_file(ply_list[frame_idx])
     N = V.shape[0]
     Nvox[frame_idx] = N
-    C = Crgb
+    Cyuv = rgb_to_yuv(Crgb.to(dtype=DTYPE)).contiguous()
+    C = to_dev(Cyuv)
+    V = V.to(dtype=DTYPE).to(device)
+
+    frame_start = time.time()
+    origin = torch.tensor([0, 0, 0], dtype=V.dtype, device=device)
+    start_time = time.time()
+    ListC, FlagsC, weightsC, order_RAGFT = raht_fn["RAHT_param"](V, origin, 2 ** J, J)
+    raht_param_time[frame_idx, :] = time.time() - start_time
+
+    ListC = [t.to(device=device, non_blocking=True) for t in ListC]
+    FlagsC = [t.to(device=device, non_blocking=True) for t in FlagsC]
+    weightsC = [t.to(device=device, non_blocking=True) for t in weightsC]
     
-    origin = torch.tensor([0, 0, 0], dtype=V.dtype)
-    t0 = time.time()
-    ListC, FlagsC, weightsC = RAHT_param(V, origin, 2**J, J)
-    t1 = time.time()
-    raht_param_time = t1 - t0
-    
-    ListC = [t.to(device) for t in ListC]
-    FlagsC = [t.to(device) for t in FlagsC]
-    weightsC = [t.to(device) for t in weightsC]
-    C = C.to(device)
-    
-    timings = {}
-    coeffs_by_variant = {}
-    for name, fn in VARIANTS.items():
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t2 = time.time()
-        Coeff, w = fn(C, ListC, FlagsC, weightsC, device)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        t3 = time.time()
-        timings[name] = t3 - t2
-        coeffs_by_variant[name] = Coeff
+    start_time = time.time()
+    Coeff, w = raht_fn["RAHT"](C, ListC, FlagsC, weightsC)
+    raht_transform_time[frame_idx, :] = time.time() - start_time
+
+    if DEBUG:
+        save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
+        save_mat(Coeff, f"../results/frame{frame}_coeff_python.mat")
+        print(f"Norm of C: {torch.norm(C)}")
+        print(f"Norm of Coeff: {torch.norm(Coeff)}")
+        print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
+        print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
+        print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
+        C_recon = inverse_RAHT_optimized(Coeff, ListC, FlagsC, weightsC)
+        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
+
+    # Sort weights in descending order
+    # values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
+    # order_morton = torch.arange(0,V.shape[0])
+
+    # Loop through quantization steps
+    for i in range(nSteps):
+        step = colorStep[i]
+        start_time = time.time()
+        Coeff_enc = torch.floor(Coeff / step + 0.5)
+        quant_time[frame_idx, i] = time.time() - start_time
+        Y_hat = Coeff_enc[:, 0] * step
+        MSE[frame_idx, i] = (torch.linalg.norm(Coeff[:,0] - Y_hat)**2) / (N * 255**2)
+        psnr[frame_idx, i] = -10 * torch.log10(MSE[frame_idx, i])
+        # Nbits = torch.ceil(torch.log2(torch.max(torch.abs(Coeff_enc)) + 1))
         
-        if DEBUG:
-            print(f"Norm of C: {torch.norm(C)}")
-            print(f"Norm of Coeff: {torch.norm(Coeff)}")
-            print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
-            print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
-            print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-            C_recon = inverse_RAHT(Coeff, ListC, FlagsC, weightsC, device)
-            if torch.allclose(C, C_recon, rtol=1e-4, atol=1e-6):
-                print("Reconstruction check: True")
-            else:
-                print("Reconstruction check: False")
-                diff = C - C_recon
-                print("Max difference:", diff.abs().max().item())
-                print("Mean difference:", diff.abs().mean().item())
+        # get reoredered coefficients
+        coeff_reordered = Coeff_enc.index_select(0, order_RAGFT)
+        coeff_cpu_i32 = coeff_reordered.to('cpu', dtype=torch.int32, non_blocking=True)
+        np_coeff = coeff_cpu_i32.numpy()                        # zero-copy view on CPU
+        Y_list = np_coeff[:, 0].tolist()
+        U_list = np_coeff[:, 1].tolist()
+        V_list = np_coeff[:, 2].tolist()
+
+        # RLGR settings
+        channels = {"Y": Y_list, "U": U_list, "V": V_list}
+        flag_signed = 1     # 1 => signed integers
+        compressed = {}     # name -> {"buf": list[uint8], "time_ns": int}
+        decoded = {}        # name -> {"out": list[int], "time_ns": int}
+
+        # encode
+        for name, data in channels.items():
+            m_write = rlgr.membuf()                 # write buffer
+            encode_time_ns = m_write.rlgrWrite(data, flag_signed)
+            m_write.close()
+            buf = m_write.get_buffer()              # list[uint8] (bytes-like)
+            compressed[name] = {"buf": buf, "time_ns": encode_time_ns}
+            # print(f"{name}: wrote {len(buf)} bytes in {encode_time_ns} ns")
         
-        # Sort weights in descending order
-        _, IX_ref = torch.sort(w, descending=True)
-        Y = Coeff[:, 0]
+        # decode
+        for name, original in channels.items():
+            original_len = len(original)
+            m_read = rlgr.membuf(compressed[name]["buf"])
+            decode_time_ns, out = m_read.rlgrRead(original_len, flag_signed)
+            m_read.close()
+            assert len(out) == original_len, f"Length mismatch for {name}: {len(out)} != {original_len}"
+            decoded[name] = {"out": out, "time_ns": decode_time_ns}
+            # print(f"{name}: read {len(out)} elems in {decode_time_ns} ns")
         
-        # temporary: filename for PyRLGR
-        filename = 'test.bin'
+        size_bytes = sum(len(b['buf']) for b in compressed.values())
+        rates[frame_idx, i] = size_bytes
+        entropy_enc_time[frame_idx, i] = sum(b["time_ns"] for b in compressed.values()) / 1e9
+        entropy_dec_time[frame_idx, i] = sum(b["time_ns"] for b in decoded.values()) / 1e9
         
-        for i in range(nSteps):
-            step = colorStep[i]
-            Coeff_enc = torch.round(Coeff / step)
-            Y_hat = Coeff_enc[:, 0] * step
-            
-            MSE[frame_idx, i] = (torch.linalg.norm(Y - Y_hat)**2) / (N * 255**2)
-            
-            # nbytesY, _ = RLGR_encoder(Coeff_enc[IX_ref, 0])
-            # nbytesU, _ = RLGR_encoder(Coeff_enc[IX_ref, 1])
-            # nbytesV, _ = RLGR_encoder(Coeff_enc[IX_ref, 2])
-            # bytes_log[frame_idx, i] = nbytesY + nbytesU + nbytesV
-            
-            enc = rlgr.file(filename, 1)
-            Y_list = [int(i) for i in Coeff_enc[IX_ref, 0].squeeze(1).tolist()]
-            U_list = [int(i) for i in Coeff_enc[IX_ref, 1].squeeze(1).tolist()]
-            V_list = [int(i) for i in Coeff_enc[IX_ref, 2].squeeze(1).tolist()]
-            enc.rlgrWrite(Y_list, 0)
-            enc.rlgrWrite(U_list, 0)
-            enc.rlgrWrite(V_list, 0)
-            enc.close()
+        coeff_dec_cpu = np.stack(
+            (decoded["Y"]["out"], decoded["U"]["out"], decoded["V"]["out"]),
+            axis=1
+        ).astype(np.int32, copy=False)
+        Coeff_dec = torch.from_numpy(coeff_dec_cpu).pin_memory().to(device=device, dtype=DTYPE, non_blocking=True)
 
-    # Print timing info
-    print(f"Frame {frame}: RAHT_param={raht_param_time:.6f}s")
-    for name, t in timings.items():
-        print(f"  {name}: {t:.6f}s")
-    
-    time_log[frame_idx] = time.time() - frame_start
-    print(f"  Frame {frame}/{T} processed in {time_log[frame_idx]:.2f} seconds.")
+        start_time = time.time()
+        Coeff_dec = Coeff_dec * step
+        dequant_time[frame_idx, i] = time.time() - start_time
+        
+        start_time = time.time()
+        order_RAGFT_dec = torch.argsort(order_RAGFT)
+        Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
+        C_rec = raht_fn["iRAHT"](Coeff_dec, ListC, FlagsC, weightsC)
+        iRAHT_time[frame_idx, i] = time.time() - start_time
+        # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
+        
+        logger.info(
+            f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
+            f"{order_RAGFT_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
+            f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
 
-# ## ---------------------
-# ## Analysis, Plotting, and Saving
-# ## ---------------------
-# print("Analyzing results...")
+    print(f"Frame {frame}")
 
-# # Calculate PSNR from the mean MSE across all frames for each quantization step
-# psnr = -10 * torch.log10(torch.mean(MSE, dim=0))
-
-# # Calculate bits per voxel (bpv)
-# total_bytes_per_step = torch.sum(bytes_log, dim=0)
-# total_voxels = torch.sum(Nvox)
-# bpv = 8 * total_bytes_per_step / total_voxels
-
-# # --- Plotting ---
-# plt.figure(figsize=(8, 6))
-# plt.plot(bpv.numpy(), psnr.numpy(), 'b-x', label='O3D Load + RAHT Sim')
-# plt.xlabel('Bits per Voxel (bpv)')
-# plt.ylabel('Y-PSNR (dB)')
-# plt.title('Rate-Distortion Curve')
-# plt.grid(True)
-# plt.legend()
-# plt.show()

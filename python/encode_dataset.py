@@ -16,7 +16,7 @@ import rlgr
 ## ---------------------
 torch.backends.cudnn.benchmark=False # for benchmarking
 DEBUG = False
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 raht_fn = {
     "RAHT": RAHT2_optimized,
     "iRAHT": inverse_RAHT_optimized,
