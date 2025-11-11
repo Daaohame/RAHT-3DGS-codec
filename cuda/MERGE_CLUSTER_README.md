@@ -8,40 +8,43 @@ This CUDA extension provides GPU-accelerated merging of 3D Gaussian clusters usi
 - `merge_cluster_wrapper.cu` - C++/CUDA wrapper for PyTorch integration
 - `merge_cluster.py` - Python interface module
 - `setup_merge_cluster.py` - Setup script for building the extension
-- `build_merge_cluster.py` - JIT compilation helper (alternative to setup.py)
 
 ## Installation
 
-### Option 1: Build and Install (Recommended for production)
+### Method 1: Install with pip (Recommended)
 
 ```bash
-cd /ssd1/haodongw/workspace/3dstream/raht-3dgs-codec/python
-python setup_merge_cluster.py install
+# For regular installation
+pip install .
+
+# For editable/development installation
+pip install -e .
 ```
 
-Or for development (builds in-place):
+### Method 2: Build with setup.py
+
 ```bash
+# Install to site-packages
+python setup_merge_cluster.py install
+
+# Or build in-place for development
 python setup_merge_cluster.py build_ext --inplace
 ```
 
-### Option 2: JIT Compilation (Convenient for development)
-
-No installation needed! The extension will be compiled automatically on first import:
-
+After installation, verify it works:
 ```python
-from build_merge_cluster import merge_gaussian_clusters
+import merge_cluster_cuda
+print("Extension successfully installed!")
 ```
-
-The compiled extension is cached, so subsequent imports are fast.
 
 ## GPU Architecture
 
-The default setup uses `sm_70` (Volta architecture). Adjust the architecture in `setup_merge_cluster.py` or `build_merge_cluster.py` based on your GPU:
+The default setup uses `sm_86` (RTX A6000). Adjust the architecture in `setup_merge_cluster.py` based on your GPU:
 
 - **sm_70**: Volta (V100)
 - **sm_75**: Turing (RTX 20xx, T4)
 - **sm_80**: Ampere (A100, RTX 30xx)
-- **sm_86**: Ampere (RTX 30xx mobile)
+- **sm_86**: Ampere (RTX 30xx mobile, RTX A6000)
 - **sm_89**: Ada Lovelace (RTX 40xx)
 
 To support multiple architectures, add multiple `-gencode` flags in the nvcc compile args.
@@ -145,15 +148,20 @@ For typical workloads (thousands of Gaussians merged into hundreds of clusters),
 
 ### Import Error: "merge_cluster_cuda extension not found"
 
-The extension hasn't been built yet. Either:
-1. Run `python setup_merge_cluster.py install`
-2. Use `from build_merge_cluster import merge_gaussian_clusters` for JIT compilation
+The extension hasn't been built yet. Build and install it:
+```bash
+python setup_merge_cluster.py install
+```
+
+Or use pip:
+```bash
+pip install .
+```
 
 ### CUDA Error: "no kernel image is available for execution"
 
-Your GPU architecture doesn't match the compiled architectures. Edit the CUDA arch in:
-- `setup_merge_cluster.py`: Change `-arch=sm_70` to match your GPU
-- `build_merge_cluster.py`: Change `-arch=sm_70` to match your GPU
+Your GPU architecture doesn't match the compiled architectures. Edit the CUDA arch in `setup_merge_cluster.py`:
+- Change `-arch=sm_86` to match your GPU (e.g., `-arch=sm_80` for A100)
 
 Check your GPU compute capability with:
 ```python

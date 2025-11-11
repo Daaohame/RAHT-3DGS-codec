@@ -2,9 +2,9 @@
 Setup script for building the merge_cluster CUDA extension.
 
 Usage:
-    python setup_merge_cluster.py install
-    or
-    python setup_merge_cluster.py build_ext --inplace
+    pip install .                    # Regular installation
+    pip install -e .                 # Editable/development installation
+    python setup_merge_cluster.py build_ext --inplace  # Build in-place only
 """
 
 from setuptools import setup
@@ -30,8 +30,7 @@ setup(
                 'nvcc': [
                     '-O3',
                     '--use_fast_math',
-                    '-arch=sm_70',  # Adjust based on your GPU architecture
-                    # Add more architectures if needed:
+                    '-arch=sm_86',  # Adjust based on your GPU architecture
                     # '-gencode=arch=compute_70,code=sm_70',
                     # '-gencode=arch=compute_75,code=sm_75',
                     # '-gencode=arch=compute_80,code=sm_80',
