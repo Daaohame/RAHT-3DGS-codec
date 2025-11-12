@@ -1,3 +1,9 @@
 results/
 python/__pycache__/
 data/
+
+.idea/
+.vscode/
+*.log
+*.tmp
+.DS_Store
