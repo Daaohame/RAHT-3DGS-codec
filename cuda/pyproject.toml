@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "merge_cluster_cuda"
+version = "1.0.0"
+description = "CUDA extension for merging 3D Gaussian clusters"
+requires-python = ">=3.8"
+dependencies = [
+    "torch",
+]
+dynamic = ["authors"]
+
+[tool.setuptools]
+packages = ["merge_cluster_cuda"]

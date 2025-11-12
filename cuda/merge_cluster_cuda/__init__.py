@@ -9,15 +9,22 @@ import torch
 from typing import Tuple
 import warnings
 
-# Try to import the compiled extension
 try:
-    import merge_cluster_cuda
+    from . import _C as cuda_extension
     _extension_available = True
 except ImportError:
+    cuda_extension = None
     _extension_available = False
     warnings.warn(
-        "merge_cluster_cuda extension not found. Please build it first using setup.py"
+        "merge_cluster_cuda._C extension not found. Please build it first using setup.py"
     )
+
+# Expose the main functions in this module's namespace
+__all__ = [
+    'merge_gaussian_clusters',
+    'merge_gaussian_clusters_with_indices',
+    'prepare_cluster_data'
+]
 
 
 def prepare_cluster_data(cluster_labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -123,7 +130,7 @@ def merge_gaussian_clusters(
     cluster_indices, cluster_offsets = prepare_cluster_data(cluster_labels)
 
     # Call CUDA kernel
-    result = merge_cluster_cuda.merge_clusters_cuda(
+    result = cuda_extension.merge_clusters_cuda(
         cluster_indices,
         cluster_offsets,
         means,
@@ -182,7 +189,7 @@ def merge_gaussian_clusters_with_indices(
     cluster_offsets = cluster_offsets.contiguous().int()
 
     # Call CUDA kernel
-    result = merge_cluster_cuda.merge_clusters_cuda(
+    result = cuda_extension.merge_clusters_cuda(
         cluster_indices,
         cluster_offsets,
         means,
