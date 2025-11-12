@@ -266,7 +266,8 @@ def voxelize_pc_batched(
         'voxel_size': voxel_size,
         'vmin': vmin,
         'width': width,
-        'N': N
+        'N': N,
+        'sort_idx': idx  # Sorting indices from Morton code ordering
     }
 
     return PCvox, PCsorted, voxel_indices, DeltaPC, info

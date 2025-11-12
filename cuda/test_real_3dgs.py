@@ -108,11 +108,11 @@ def create_cluster_labels(N, num_clusters, strategy='random'):
         raise ValueError(f"Unknown strategy: {strategy}")
 
 
-def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
-    """Main test function."""
+def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10):
+    """Main test function using voxelize_pc for positions and merge_cluster for attributes."""
 
     print("=" * 80)
-    print("Testing merge_cluster_cuda with real 3DGS checkpoint")
+    print("Testing voxelize_pc + merge_cluster with real 3DGS checkpoint")
     print("=" * 80)
 
     # Load checkpoint
@@ -136,17 +136,65 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
     print(f"  Colors shape: {params['colors'].shape}")
     print(f"  Color dimension: {color_dim}")
 
-    # Create cluster labels
+    # Step 1: Quantize positions only
     print(f"\n" + "=" * 80)
-    print(f"Creating cluster labels (num_clusters={num_clusters})...")
+    print(f"Step 1: Quantizing positions (J={J})...")
     print("=" * 80)
-    cluster_labels = create_cluster_labels(N, num_clusters, strategy='random')
-    unique_clusters = torch.unique(cluster_labels)
-    print(f"  Created {len(unique_clusters)} unique clusters")
 
-    # Test merging
+    print(f"  Warming up CUDA kernels...")
+    for _ in range(3):
+        voxelize_pc_batched(params['means'], J=J, device='cuda')
+
+    torch.cuda.synchronize()
+    voxel_start_time = time.time()
+
+    PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
+        params['means'],  # Only positions, shape [N, 3]
+        J=J,
+        device='cuda'
+    )
+
+    torch.cuda.synchronize()
+    voxel_elapsed_time = time.time() - voxel_start_time
+
+    Nvox = voxel_info['Nvox']
+
+    print(f"  Quantization completed in {voxel_elapsed_time*1000:.2f} ms")
+    print(f"  Input Gaussians: {N}")
+    print(f"  Output voxels: {Nvox}")
+    print(f"  Voxel size: {voxel_info['voxel_size']:.6f}")
+    print(f"  Compression ratio: {N / Nvox:.2f}x")
+
+    # Step 2: Create cluster labels from voxel assignments
     print(f"\n" + "=" * 80)
-    print(f"Testing cluster merging (weight_by_opacity={weight_by_opacity})...")
+    print(f"Step 2: Creating cluster labels from voxel assignments...")
+    print("=" * 80)
+
+    # Each point between voxel_indices[i] and voxel_indices[i+1] belongs to voxel i
+    # We need to map this back to the original unsorted order
+    voxel_counts_int = torch.diff(
+        torch.cat([voxel_indices, torch.tensor([N], device='cuda')])
+    )
+
+    # Create voxel_id for sorted points [N]
+    voxel_id_sorted = torch.repeat_interleave(
+        torch.arange(Nvox, device='cuda'),
+        voxel_counts_int
+    )
+
+    # Use the sort indices returned by voxelize_pc (no need to recalculate Morton codes)
+    sort_idx = voxel_info['sort_idx']
+
+    # Create inverse mapping to unsort cluster labels
+    cluster_labels = torch.zeros(N, dtype=torch.long, device='cuda')
+    cluster_labels[sort_idx] = voxel_id_sorted
+
+    unique_clusters = torch.unique(cluster_labels)
+    print(f"  Created {len(unique_clusters)} unique clusters (should equal {Nvox} voxels)")
+
+    # Step 3: Merge attributes using cluster labels
+    print(f"\n" + "=" * 80)
+    print(f"Step 3: Merging attributes with merge_cluster (weight_by_opacity={weight_by_opacity})...")
     print("=" * 80)
 
     # Warmup to avoid CUDA JIT compilation overhead
@@ -165,7 +213,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
     torch.cuda.synchronize()
     start_time = time.time()
 
-    merged_means, merged_quats, merged_scales, merged_opacities, merged_colors = \
+    merged_means_unused, merged_quats, merged_scales, merged_opacities, merged_colors = \
         merge_gaussian_clusters(
             params['means'],
             params['quats'],
@@ -179,70 +227,31 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
     torch.cuda.synchronize()
     elapsed_time = time.time() - start_time
 
+    # Step 4: Use voxelized positions instead of merged positions
+    print(f"\n" + "=" * 80)
+    print(f"Step 4: Replacing merged positions with voxelized positions...")
+    print("=" * 80)
+
+    # PCvox is [Nvox, 3] with integer voxel coordinates
+    # convert back to world coordinates: world_pos = vmin + voxel_coords * voxel_size
+    merged_means = voxel_info['vmin'].unsqueeze(0) + PCvox * voxel_info['voxel_size']
+
     # Print results
     print(f"\nMerge completed successfully!")
-    print(f"  Time taken: {elapsed_time*1000:.2f} ms")
+    print(f"  Voxelization time: {voxel_elapsed_time*1000:.2f} ms")
+    print(f"  Attribute merging time: {elapsed_time*1000:.2f} ms")
+    print(f"  Total time: {(voxel_elapsed_time + elapsed_time)*1000:.2f} ms")
     print(f"  Input Gaussians: {N}")
     print(f"  Output clusters: {merged_means.shape[0]}")
     print(f"  Compression ratio: {N / merged_means.shape[0]:.2f}x")
 
     print(f"\nMerged tensor shapes:")
-    print(f"  Means: {merged_means.shape}")
-    print(f"  Quats: {merged_quats.shape}")
-    print(f"  Scales: {merged_scales.shape}")
-    print(f"  Opacities: {merged_opacities.shape}")
-    print(f"  Colors: {merged_colors.shape}")
+    print(f"  Means (from voxelize_pc): {merged_means.shape}")
+    print(f"  Quats (from merge_cluster): {merged_quats.shape}")
+    print(f"  Scales (from merge_cluster): {merged_scales.shape}")
+    print(f"  Opacities (from merge_cluster): {merged_opacities.shape}")
+    print(f"  Colors (from merge_cluster): {merged_colors.shape}")
 
-    # Test voxelization on merged Gaussians
-    print(f"\n" + "=" * 80)
-    print("Testing voxelization on merged Gaussians...")
-    print("=" * 80)
-
-    # Prepare point cloud data: concatenate means with colors (use SH DC component if available)
-    # For voxelization, we'll use means (xyz) and the first 3 channels of colors (RGB equivalent)
-    if merged_colors.shape[1] >= 3:
-        # Use first 3 color channels (DC component of SH)
-        pc_colors = merged_colors[:, :3]
-    else:
-        # Use all available color channels
-        pc_colors = merged_colors
-
-    # Create point cloud tensor [N, 3+d] where d is color dimension
-    pc_data = torch.cat([merged_means, pc_colors], dim=1)
-
-    # Warmup to avoid CUDA JIT compilation overhead
-    print("\n  Warming up CUDA kernels...")
-    for _ in range(3):
-        voxelize_pc_batched(pc_data, J=8, device='cuda')
-        voxelize_pc_batched(pc_data, J=10, device='cuda')
-
-    # Test with different octree depths
-    for J in [8, 10]:
-        print(f"\n  Testing with octree depth J={J}:")
-
-        torch.cuda.synchronize()
-        voxel_start_time = time.time()
-
-        PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
-            pc_data,
-            J=J,
-            device='cuda'
-        )
-
-        torch.cuda.synchronize()
-        voxel_elapsed_time = time.time() - voxel_start_time
-
-        print(f"    Voxelization time: {voxel_elapsed_time*1000:.2f} ms")
-        print(f"    Input points: {voxel_info['N']}")
-        print(f"    Output voxels: {voxel_info['Nvox']}")
-        print(f"    Voxel size: {voxel_info['voxel_size']:.6f}")
-        print(f"    Compression ratio: {voxel_info['N'] / voxel_info['Nvox']:.2f}x")
-        print(f"    PCvox shape: {PCvox.shape}")
-        print(f"      ↳ [Nvox, 6] = [{voxel_info['Nvox']}, 3 xyz coords + 3 RGB colors]")
-        print(f"      ↳ One row per unique voxel with averaged attributes")
-        print(f"    DeltaPC shape: {DeltaPC.shape}")
-        print(f"      ↳ [N, 6] = [{voxel_info['N']}, 3 xyz deltas + 3 RGB deltas]")
-        print(f"      ↳ Quantization error for each original point")
 
     # Verify results
     print(f"\n" + "=" * 80)
@@ -275,7 +284,9 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
         'original_count': N,
         'merged_count': merged_means.shape[0],
         'compression_ratio': N / merged_means.shape[0],
-        'time_ms': elapsed_time * 1000,
+        'voxel_time_ms': voxel_elapsed_time * 1000,
+        'merge_time_ms': elapsed_time * 1000,
+        'total_time_ms': (voxel_elapsed_time + elapsed_time) * 1000,
         'merged_means': merged_means,
         'merged_quats': merged_quats,
         'merged_scales': merged_scales,
@@ -286,11 +297,11 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True):
 
 if __name__ == '__main__':
     ckpt_path = "/ssd1/rajrup/Project/gsplat/results/actorshq_l1_0.5_ssim_0.5_alpha_1.0/Actor01/Sequence1/resolution_4/0/ckpts/ckpt_29999_rank0.pt"
-    
+
     try:
         results = test_merge_cluster(
             ckpt_path,
-            num_clusters=50000,
+            J=10,  # Octree depth for voxelization
             weight_by_opacity=True
         )
 
@@ -300,7 +311,9 @@ if __name__ == '__main__':
         print(f"  Original Gaussians: {results['original_count']}")
         print(f"  Merged Clusters: {results['merged_count']}")
         print(f"  Compression: {results['compression_ratio']:.2f}x")
-        print(f"  Execution time: {results['time_ms']:.2f} ms")
+        print(f"  Voxelization time: {results['voxel_time_ms']:.2f} ms")
+        print(f"  Attribute merging time: {results['merge_time_ms']:.2f} ms")
+        print(f"  Total execution time: {results['total_time_ms']:.2f} ms")
 
     except Exception as e:
         print(f"\nError during testing: {e}")
