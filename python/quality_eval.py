@@ -5,10 +5,12 @@ Provides functions to:
 - Export 3DGS to PLY format
 - Compute attribute quality metrics (MSE, RMSE, etc.)
 - Map merged Gaussians back to original indices for comparison
+- Render Gaussians and compute PSNR
 """
 
 import torch
 import numpy as np
+import time
 from typing import Dict, Tuple
 from pathlib import Path
 
@@ -183,55 +185,330 @@ def print_metrics(metrics: Dict[str, float], title: str = "Quality Metrics") -> 
     print(title)
     print('=' * 80)
 
-    print("\nPosition:")
-    print(f"  MSE:  {metrics['position_mse']:.6e}")
-    print(f"  RMSE: {metrics['position_rmse']:.6e}")
-
     print("\nQuaternion (rotation):")
     print(f"  Mean distance: {metrics['quaternion_mean_dist']:.6e}")
     print(f"  Max distance:  {metrics['quaternion_max_dist']:.6e}")
 
-    print("\nScale (log space):")
-    print(f"  MSE:  {metrics['scale_log_mse']:.6e}")
-    print(f"  RMSE: {metrics['scale_log_rmse']:.6e}")
 
-    print("\nOpacity:")
-    print(f"  MSE:  {metrics['opacity_mse']:.6e}")
-    print(f"  RMSE: {metrics['opacity_rmse']:.6e}")
+def generate_random_cameras(
+    center: torch.Tensor,
+    radius: float,
+    n_views: int = 5,
+    image_width: int = 512,
+    image_height: int = 512,
+    device: str = 'cuda'
+) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
+    """
+    Generate random camera poses looking at a scene center.
 
-    print("\nColor (SH coefficients):")
-    print(f"  MSE:  {metrics['color_mse']:.6e}")
-    print(f"  RMSE: {metrics['color_rmse']:.6e}")
+    Args:
+        center: [3] Scene center point
+        radius: Distance from center to camera
+        n_views: Number of camera views to generate
+        image_width: Image width in pixels
+        image_height: Image height in pixels
+        device: Device to use
+
+    Returns:
+        viewmats: [n_views, 4, 4] World-to-camera matrices
+        Ks: [n_views, 3, 3] Intrinsic matrices
+        width: Image width
+        height: Image height
+    """
+    import math
+
+    # Generate random camera positions on a sphere
+    viewmats = []
+    for i in range(n_views):
+        # Random spherical coordinates
+        theta = torch.rand(1).item() * 2 * math.pi  # azimuth
+        phi = (torch.rand(1).item() * 0.5 + 0.25) * math.pi  # elevation (avoid poles)
+
+        # Convert to Cartesian
+        x = radius * math.sin(phi) * math.cos(theta)
+        y = radius * math.sin(phi) * math.sin(theta)
+        z = radius * math.cos(phi)
+
+        cam_pos = center + torch.tensor([x, y, z], device=device)
+
+        # Look-at matrix construction (standard computer graphics)
+        forward = center - cam_pos
+        forward = forward / torch.norm(forward)
+
+        # Up vector
+        world_up = torch.tensor([0.0, 1.0, 0.0], device=device)
+        right = torch.linalg.cross(world_up, forward)
+        if torch.norm(right) < 0.001:  # Handle degenerate case
+            world_up = torch.tensor([0.0, 0.0, 1.0], device=device)
+            right = torch.linalg.cross(world_up, forward)
+        right = right / torch.norm(right)
+        up = torch.linalg.cross(forward, right)
+
+        # Build view matrix (world-to-camera)
+        # gsplat convention: camera looks down +Z in camera space
+        w2c = torch.eye(4, device=device)
+        w2c[0, :3] = right
+        w2c[1, :3] = up
+        w2c[2, :3] = forward  # Camera looks down +Z in camera space
+        w2c[:3, 3] = -torch.mv(w2c[:3, :3], cam_pos)
+
+        viewmats.append(w2c)
+
+    viewmats = torch.stack(viewmats)
+
+    # Create intrinsic matrix (simple pinhole model)
+    focal = image_width * 1.2  # Reasonable FOV
+    K = torch.tensor([
+        [focal, 0, image_width / 2],
+        [0, focal, image_height / 2],
+        [0, 0, 1]
+    ], device=device)
+    Ks = K.unsqueeze(0).repeat(n_views, 1, 1)
+
+    return viewmats, Ks, image_width, image_height
+
+
+def render_gaussians(
+    means: torch.Tensor,
+    quats: torch.Tensor,
+    scales: torch.Tensor,
+    opacities: torch.Tensor,
+    colors: torch.Tensor,
+    viewmats: torch.Tensor,
+    Ks: torch.Tensor,
+    width: int,
+    height: int
+) -> torch.Tensor:
+    """
+    Render Gaussians from multiple viewpoints using gsplat.
+
+    Args:
+        means: [N, 3] Gaussian centers
+        quats: [N, 4] Quaternions
+        scales: [N, 3] Scales
+        opacities: [N] Opacities
+        colors: [N, C] Colors (SH coefficients)
+        viewmats: [V, 4, 4] View matrices
+        Ks: [V, 3, 3] Intrinsic matrices
+        width: Image width
+        height: Image height
+
+    Returns:
+        images: [V, H, W, 3] Rendered RGB images
+    """
+    import gsplat
+
+    n_views = viewmats.shape[0]
+    device = means.device
+
+    # Scales should already be in linear space after exponentiation in test_voxelize_3dgs.py
+
+    # Reshape colors to [N, K, 3] format expected by gsplat for SH coefficients
+    # colors is [N, 48] = [N, 16 * 3] for 16 SH coefficients
+    # Reshape to [N, 16, 3]
+    if colors.shape[1] % 3 == 0:
+        K = colors.shape[1] // 3
+        colors_reshaped = colors.reshape(-1, K, 3)
+        sh_degree = int(np.sqrt(K) - 1)  # Degree from number of coefficients
+    else:
+        # Fallback: use first 3 as RGB
+        colors_reshaped = colors[:, :3].unsqueeze(1)  # [N, 1, 3]
+        sh_degree = None
+
+    images = []
+
+    for i in range(n_views):
+        # Render using gsplat with white background
+        backgrounds = torch.ones((1, 3), device=device)
+
+        renders, alphas, info = gsplat.rasterization(
+            means=means,
+            quats=quats / quats.norm(dim=-1, keepdim=True),  # Ensure normalized
+            scales=scales,
+            opacities=opacities.squeeze(),
+            colors=colors_reshaped,
+            viewmats=viewmats[i:i+1],
+            Ks=Ks[i:i+1],
+            width=width,
+            height=height,
+            sh_degree=sh_degree,
+            packed=False,
+            backgrounds=backgrounds,
+        )
+
+        images.append(renders[0])  # [H, W, 3]
+
+    return torch.stack(images)  # [V, H, W, 3]
+
+
+def compute_psnr(img1: torch.Tensor, img2: torch.Tensor) -> float:
+    """
+    Compute PSNR between two images.
+
+    Args:
+        img1, img2: Images of shape [..., H, W, 3] in range [0, 1]
+
+    Returns:
+        PSNR value in dB
+    """
+    mse = torch.mean((img1 - img2) ** 2)
+    if mse == 0:
+        return float('inf')
+    psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
+    return psnr.item()
 
 
 def try_render_comparison(
     original_params: Dict[str, torch.Tensor],
     merged_params: Dict[str, torch.Tensor],
-    camera_params: Dict[str, torch.Tensor] = None
+    n_views: int = 5,
+    image_size: int = 512,
+    output_dir: str = None
 ) -> Dict[str, float]:
     """
-    Attempt to render both original and merged Gaussians and compute image metrics.
-
-    Requires gsplat library to be installed.
+    Render both original and merged Gaussians from random views and compute PSNR.
 
     Args:
         original_params: Dict with keys: means, quats, scales, opacities, colors
         merged_params: Dict with keys: means, quats, scales, opacities, colors
-        camera_params: Optional camera parameters (if None, skips rendering)
+        n_views: Number of random camera views to render
+        image_size: Image resolution (square images)
+        output_dir: Optional directory to save rendered images
 
     Returns:
-        Dictionary with PSNR, SSIM, LPIPS metrics (or empty dict if rendering fails)
+        Dictionary with PSNR metrics per view and average
     """
     try:
         import gsplat
-        print("\ngsplat found! Rendering comparison...")
+        print(f"\n{'=' * 80}")
+        print(f"Rendering comparison with {n_views} random camera views...")
+        print('=' * 80)
 
-        # TODO: Implement rendering logic
-        # This requires camera parameters and a rendering loop
-        # For now, return empty dict
-        print("  (Rendering not implemented yet - requires camera parameters)")
-        return {}
+        device = original_params['means'].device
+
+        # Compute scene center and bounds from original Gaussians
+        center = original_params['means'].mean(dim=0)
+        bbox_size = (original_params['means'].max(dim=0)[0] -
+                     original_params['means'].min(dim=0)[0]).max().item()
+        radius = bbox_size * 1.5  # Camera distance from center
+
+        print(f"  Scene center: {center.cpu().numpy()}")
+        print(f"  Scene size: {bbox_size:.4f}")
+        print(f"  Camera radius: {radius:.4f}")
+
+        # Generate random camera views
+        viewmats, Ks, width, height = generate_random_cameras(
+            center=center,
+            radius=radius,
+            n_views=n_views,
+            image_width=image_size,
+            image_height=image_size,
+            device=device
+        )
+
+        print(f"\n  Rendering original Gaussians ({original_params['means'].shape[0]} points)...")
+        torch.cuda.synchronize()
+        start_time = time.time()
+
+        original_images = render_gaussians(
+            means=original_params['means'],
+            quats=original_params['quats'],
+            scales=original_params['scales'],
+            opacities=original_params['opacities'],
+            colors=original_params['colors'],
+            viewmats=viewmats,
+            Ks=Ks,
+            width=width,
+            height=height
+        )
+
+        torch.cuda.synchronize()
+        original_time = time.time() - start_time
+        print(f"    Time: {original_time*1000:.2f} ms ({original_time*1000/n_views:.2f} ms/view)")
+
+        print(f"\n  Rendering merged Gaussians ({merged_params['means'].shape[0]} points)...")
+        torch.cuda.synchronize()
+        start_time = time.time()
+
+        merged_images = render_gaussians(
+            means=merged_params['means'],
+            quats=merged_params['quats'],
+            scales=merged_params['scales'],
+            opacities=merged_params['opacities'],
+            colors=merged_params['colors'],
+            viewmats=viewmats,
+            Ks=Ks,
+            width=width,
+            height=height
+        )
+
+        torch.cuda.synchronize()
+        merged_time = time.time() - start_time
+        print(f"    Time: {merged_time*1000:.2f} ms ({merged_time*1000/n_views:.2f} ms/view)")
+
+        # Compute PSNR for each view
+        print(f"\n  Computing PSNR metrics...")
+        print(f"  Image statistics:")
+        print(f"    Original images: min={original_images.min().item():.4f}, max={original_images.max().item():.4f}, mean={original_images.mean().item():.4f}")
+        print(f"    Merged images: min={merged_images.min().item():.4f}, max={merged_images.max().item():.4f}, mean={merged_images.mean().item():.4f}")
+
+        psnrs = []
+        for i in range(n_views):
+            mse = torch.mean((original_images[i] - merged_images[i]) ** 2).item()
+            psnr = compute_psnr(original_images[i], merged_images[i])
+            psnrs.append(psnr)
+            print(f"    View {i+1}: MSE={mse:.6e}, PSNR={psnr:.2f} dB")
+
+        avg_psnr = np.mean(psnrs)
+        std_psnr = np.std(psnrs)
+        min_psnr = np.min(psnrs)
+        max_psnr = np.max(psnrs)
+
+        print(f"\n  Average PSNR: {avg_psnr:.2f} ± {std_psnr:.2f} dB")
+        print(f"  Range: [{min_psnr:.2f}, {max_psnr:.2f}] dB")
+
+        # Save rendered images if output directory is specified
+        if output_dir is not None:
+            import os
+            from PIL import Image
+
+            os.makedirs(output_dir, exist_ok=True)
+            print(f"\n  Saving rendered images to {output_dir}/...")
+
+            for i in range(n_views):
+                # Convert to uint8 [0, 255]
+                original_img = (original_images[i].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+                merged_img = (merged_images[i].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+                # Save original
+                Image.fromarray(original_img).save(os.path.join(output_dir, f"view_{i:03d}_original.png"))
+
+                # Save merged
+                Image.fromarray(merged_img).save(os.path.join(output_dir, f"view_{i:03d}_merged.png"))
+
+                # Save side-by-side comparison
+                comparison = np.concatenate([original_img, merged_img], axis=1)
+                Image.fromarray(comparison).save(os.path.join(output_dir, f"view_{i:03d}_comparison.png"))
+
+            print(f"    Saved {n_views} views (original, merged, and comparison)")
+
+        metrics = {
+            'psnr_avg': avg_psnr,
+            'psnr_std': std_psnr,
+            'psnr_min': min_psnr,
+            'psnr_max': max_psnr,
+            'psnr_per_view': psnrs,
+            'original_render_time_ms': original_time * 1000,
+            'merged_render_time_ms': merged_time * 1000,
+        }
+
+        return metrics
 
     except ImportError:
         print("\ngsplat not available - skipping rendering comparison")
+        return {}
+    except Exception as e:
+        print(f"\nError during rendering: {e}")
+        import traceback
+        traceback.print_exc()
         return {}

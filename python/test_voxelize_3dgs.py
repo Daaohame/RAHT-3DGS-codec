@@ -356,6 +356,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     )
 
     # 3. Try rendering comparison (if gsplat is available)
+    render_output_dir = os.path.join(output_dir, "renders")
     rendering_metrics = try_render_comparison(
         {
             'means': params['means'],
@@ -370,7 +371,9 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
             'scales': merged_scales,
             'opacities': merged_opacities,
             'colors': merged_colors
-        }
+        },
+        n_views=50,
+        output_dir=render_output_dir
     )
 
     return {
@@ -398,7 +401,7 @@ if __name__ == '__main__':
     try:
         results = test_merge_cluster(
             ckpt_path,
-            J=10,  # Octree depth for voxelization
+            J=15,  # Octree depth for voxelization
             weight_by_opacity=True
         )
 
@@ -412,17 +415,25 @@ if __name__ == '__main__':
         print(f"  Attribute merging time: {results['merge_time_ms']:.2f} ms")
         print(f"  Total execution time: {results['total_time_ms']:.2f} ms")
 
-        print("\nQuality Metrics:")
+        print("\nAttribute Quality Metrics:")
         metrics = results['quality_metrics']
-        print(f"  Position RMSE: {metrics['position_rmse']:.6e}")
         print(f"  Quaternion mean dist: {metrics['quaternion_mean_dist']:.6e}")
-        print(f"  Scale log RMSE: {metrics['scale_log_rmse']:.6e}")
-        print(f"  Opacity RMSE: {metrics['opacity_rmse']:.6e}")
-        print(f"  Color RMSE: {metrics['color_rmse']:.6e}")
+
+        # Show rendering metrics if available
+        if results['rendering_metrics']:
+            render_metrics = results['rendering_metrics']
+            print("\nRendering Quality Metrics:")
+            print(f"  PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
+            print(f"  PSNR range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
+            print(f"  Original render time: {render_metrics['original_render_time_ms']:.2f} ms")
+            print(f"  Merged render time: {render_metrics['merged_render_time_ms']:.2f} ms")
 
         print("\nOutput Files:")
         print(f"  Original PLY: {results['original_ply_path']}")
         print(f"  Merged PLY: {results['merged_ply_path']}")
+
+        if results['rendering_metrics']:
+            print(f"  Rendered images: output_ply/renders/")
 
     except Exception as e:
         print(f"\nError during testing: {e}")
