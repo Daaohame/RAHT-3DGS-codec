@@ -59,8 +59,6 @@ def get_morton_code(V: torch.Tensor, J: int) -> torch.Tensor:
     return MC
 
 
-
-
 def voxelize_pc_batched(
     PC: torch.Tensor,
     vmin: Optional[torch.Tensor] = None,
@@ -240,7 +238,9 @@ def voxelize_pc(PC: torch.Tensor, param: dict) -> Tuple[torch.Tensor, torch.Tens
             Cvox = None
 
         # 1. Write the voxelized point cloud to a .ply file
-        Vvox_coords = (Vvox_integer.float() * voxel_size) + vmin_used
+        # Convert integer voxel indices to world coordinates (voxel centers)
+        # Use voxel center: (index + 0.5) * voxel_size + vmin
+        Vvox_coords = ((Vvox_integer.float() + 0.5) * voxel_size) + vmin_used
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(Vvox_coords.cpu().numpy())
 
@@ -253,6 +253,20 @@ def voxelize_pc(PC: torch.Tensor, param: dict) -> Tuple[torch.Tensor, torch.Tens
         filename_pcvox = f"{filename}_vox.ply"
         o3d.io.write_point_cloud(filename_pcvox, pc)
         print(f"Voxelized point cloud saved to {filename_pcvox}")
+
+        # 1b. Also write the sorted original point cloud (full detail, Morton order)
+        if hasAttribute:
+            Vsorted = PCsorted[:, :3]
+            Csorted = PCsorted[:, 3:]
+            pc_sorted = o3d.geometry.PointCloud()
+            pc_sorted.points = o3d.utility.Vector3dVector(Vsorted.cpu().numpy())
+            Csorted_for_ply = Csorted.cpu().numpy()
+            if torch.max(Csorted) > 1.0:
+                Csorted_for_ply = Csorted_for_ply / 255.0
+            pc_sorted.colors = o3d.utility.Vector3dVector(Csorted_for_ply)
+            filename_sorted = f"{filename}_sorted.ply"
+            o3d.io.write_point_cloud(filename_sorted, pc_sorted)
+            print(f"Sorted original point cloud saved to {filename_sorted}")
 
         # 2. Write the metadata and deltas to a .txt file
         filename_data = f"{filename}_data.txt"

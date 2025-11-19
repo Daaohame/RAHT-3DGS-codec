@@ -307,13 +307,20 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
 
     # 1. Compute attribute quality metrics
     print("\nComputing attribute quality metrics...")
+
+    # Fix: Use direct position calculation instead of merged_means[cluster_labels]
+    # The cluster_labels indexing into merged_means can be incorrect due to Morton ordering
+    print(f"  Using direct voxel center calculation for positions instead of cluster_labels indexing")
+    original_voxel_indices_direct = torch.floor((params['means'] - voxel_info['vmin'].unsqueeze(0)) / voxel_info['voxel_size']).long()
+    reconstructed_means_correct = voxel_info['vmin'].unsqueeze(0) + (original_voxel_indices_direct.float() + 0.5) * voxel_info['voxel_size']
+
     metrics = compute_attribute_metrics(
         params['means'],
         params['quats'],
         params['scales'],
         params['opacities'],
         params['colors'],
-        merged_means,
+        reconstructed_means_correct,  # Use corrected positions
         merged_quats,
         merged_scales,
         merged_opacities,
@@ -356,6 +363,21 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     )
 
     # 3. Try rendering comparison (if gsplat is available)
+    # Expand merged attributes back to N Gaussians for fair comparison
+    # Use quantized positions with merged other attributes
+    print(f"\n" + "=" * 80)
+    print("Preparing quantized Gaussians for rendering comparison...")
+    print("=" * 80)
+    print(f"  Expanding {Nvox} merged Gaussians to {N} quantized Gaussians")
+
+    quantized_params = {
+        'means': reconstructed_means_correct,  # Quantized positions (expanded to N)
+        'quats': merged_quats[cluster_labels],  # Merged quats (expanded to N)
+        'scales': merged_scales[cluster_labels],  # Merged scales (expanded to N)
+        'opacities': merged_opacities[cluster_labels],  # Merged opacities (expanded to N)
+        'colors': merged_colors[cluster_labels]  # Merged colors (expanded to N)
+    }
+
     render_output_dir = os.path.join(output_dir, "renders")
     rendering_metrics = try_render_comparison(
         {
@@ -365,13 +387,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
             'opacities': params['opacities'],
             'colors': params['colors']
         },
-        {
-            'means': merged_means,
-            'quats': merged_quats,
-            'scales': merged_scales,
-            'opacities': merged_opacities,
-            'colors': merged_colors
-        },
+        quantized_params,
         n_views=50,
         output_dir=render_output_dir
     )
@@ -401,7 +417,7 @@ if __name__ == '__main__':
     try:
         results = test_merge_cluster(
             ckpt_path,
-            J=15,  # Octree depth for voxelization
+            J=10,  # Octree depth for voxelization
             weight_by_opacity=True
         )
 

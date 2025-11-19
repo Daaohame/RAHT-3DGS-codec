@@ -72,14 +72,19 @@ end
 
 DeltaC = C0-C0voxelized;
 
+% Get voxelized coordinates in integer voxel space
 Vvox = V0_integer(voxel_indices,:);
 Cvox = C0voxelized(voxel_indices,:);
 
 PCvox = [Vvox, Cvox];
 DeltaPC = [DeltaV, DeltaC];
 if(writeFileOut)
-  
-  pc = pointCloud(single(Vvox),'color',uint8(Cvox));%there is some loss by converting to uint8
+
+  % Convert voxel indices back to world coordinates for output (voxel centers)
+  % Use voxel center: (index + 0.5) * voxel_size + vmin
+  Vvox_world = (V0_integer(voxel_indices,:) + 0.5) * voxel_size + repmat(vmin, size(voxel_indices,1), 1);
+
+  pc = pointCloud(single(Vvox_world),'color',uint8(Cvox));%there is some loss by converting to uint8
   filename_pcvox = sprintf('%s_vox.ply',filename);
   pcwrite(pc,filename_pcvox);
   
