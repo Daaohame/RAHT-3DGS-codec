@@ -156,11 +156,23 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
 
     # Unsort cluster labels to match original point order
     sort_idx = voxel_info['sort_idx']
+    # Use scatter_ for efficient unsorting (avoid slow Python loop)
     unsorted_cluster_labels = torch.zeros_like(cluster_labels)
-    for i in range(N):
-        unsorted_cluster_labels[sort_idx[i]] = cluster_labels[i]
+    unsorted_cluster_labels.scatter_(0, sort_idx, cluster_labels)
 
     # 3. Merge all attributes
+    # Warmup to avoid CUDA JIT compilation overhead
+    for _ in range(3):
+        _ = merge_gaussian_clusters(
+            params['means'],
+            params['quats'],
+            params['scales'],
+            params['opacities'],
+            params['colors'],
+            unsorted_cluster_labels,
+            weight_by_opacity=True
+        )
+
     torch.cuda.synchronize()
     merge_start_time = time.time()
 
