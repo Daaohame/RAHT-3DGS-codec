@@ -27,14 +27,14 @@ from quality_eval import (
 )
 
 
-def load_3dgs_checkpoint(ckpt_path):
+def load_3dgs_checkpoint(ckpt_path, device='cuda'):
     """Load 3DGS checkpoint and extract Gaussian parameters."""
     print(f"Loading checkpoint from: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location='cuda', weights_only=True)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
     return checkpoint
 
 
-def extract_gaussian_params(checkpoint):
+def extract_gaussian_params(checkpoint, device='cuda'):
     """Extract Gaussian parameters from checkpoint."""
     if 'splats' not in checkpoint:
         raise ValueError("Checkpoint does not contain 'splats' key")
@@ -45,19 +45,19 @@ def extract_gaussian_params(checkpoint):
     # Extract means (positions)
     if 'means' not in splats:
         raise ValueError("Missing 'means' in splats")
-    params['means'] = splats['means'].cuda().float()
+    params['means'] = splats['means'].to(device).float()
 
     # Extract quaternions (rotations)
     if 'quats' not in splats:
         raise ValueError("Missing 'quats' in splats")
-    params['quats'] = splats['quats'].cuda().float()
+    params['quats'] = splats['quats'].to(device).float()
     # Normalize quaternions
     params['quats'] = params['quats'] / params['quats'].norm(dim=1, keepdim=True)
 
     # Extract scales
     if 'scales' not in splats:
         raise ValueError("Missing 'scales' in splats")
-    params['scales'] = splats['scales'].cuda().float()
+    params['scales'] = splats['scales'].to(device).float()
     # Scales might be in log space, exponentiate if needed
     if params['scales'].min() < 0:
         params['scales'] = torch.exp(params['scales'])
@@ -65,20 +65,20 @@ def extract_gaussian_params(checkpoint):
     # Extract opacities
     if 'opacities' not in splats:
         raise ValueError("Missing 'opacities' in splats")
-    params['opacities'] = splats['opacities'].cuda().float().squeeze()
+    params['opacities'] = splats['opacities'].to(device).float().squeeze()
     # Opacities might be in logit space, apply sigmoid if needed
     if params['opacities'].min() < 0 or params['opacities'].max() > 1:
         params['opacities'] = torch.sigmoid(params['opacities'])
 
     # Extract colors from SH coefficients
     if 'sh0' in splats:
-        sh0 = splats['sh0'].cuda().float()
+        sh0 = splats['sh0'].to(device).float()
         # Flatten if needed (e.g., [N, 3, 1] -> [N, 3])
         if sh0.ndim > 2:
             sh0 = sh0.reshape(sh0.shape[0], -1)
 
         if 'shN' in splats and splats['shN'] is not None:
-            shN = splats['shN'].cuda().float()
+            shN = splats['shN'].to(device).float()
             # Flatten if needed
             if shN.ndim > 2:
                 shN = shN.reshape(shN.shape[0], -1)
@@ -93,7 +93,7 @@ def extract_gaussian_params(checkpoint):
     return params
 
 
-def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
+def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cuda'):
     """
     Compress 3DGS from N to Nvox Gaussians.
 
@@ -107,14 +107,16 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
         ckpt_path: Path to the 3DGS checkpoint
         J: Octree depth for voxelization
         output_dir: Directory to save output PLY files
+        device: CUDA device to use (e.g., 'cuda', 'cuda:0', 'cuda:1')
     """
     print("=" * 80)
     print("3DGS Compression: N → Nvox Gaussians")
     print("=" * 80)
+    print(f"Using device: {device}")
 
     # Load checkpoint and extract parameters
-    checkpoint = load_3dgs_checkpoint(ckpt_path)
-    params = extract_gaussian_params(checkpoint)
+    checkpoint = load_3dgs_checkpoint(ckpt_path, device=device)
+    params = extract_gaussian_params(checkpoint, device=device)
 
     N = params['means'].shape[0]
     print(f"Number of Gaussians: {N}")
@@ -124,7 +126,7 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
 
     # Warmup
     for _ in range(3):
-        voxelize_pc_batched(positions, J=J, device='cuda')
+        voxelize_pc_batched(positions, J=J, device=device)
 
     # Timed voxelization
     print(f"\n" + "=" * 80)
@@ -135,7 +137,7 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
     voxel_start_time = time.time()
 
     PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
-        positions, J=J, device='cuda'
+        positions, J=J, device=device
     )
 
     torch.cuda.synchronize()
@@ -148,7 +150,7 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed"):
     print(f"📏 Voxel size: {voxel_info['voxel_size']:.6f}")
 
     # 2. Create cluster labels for merging
-    cluster_labels = torch.zeros(N, dtype=torch.long, device='cuda')
+    cluster_labels = torch.zeros(N, dtype=torch.long, device=device)
     for voxel_id in range(Nvox):
         start_idx = voxel_indices[voxel_id]
         end_idx = voxel_indices[voxel_id + 1] if voxel_id < Nvox - 1 else N
@@ -277,7 +279,8 @@ if __name__ == '__main__':
         results = compress_to_nvox(
             ckpt_path,
             J=10,  # Octree depth for voxelization
-            output_dir="output_compressed"
+            output_dir="output_compressed",
+            device="cuda:1"  # Change to "cuda:0", "cuda:1", etc. to use a specific GPU
         )
 
         print("\n" + "=" * 80)

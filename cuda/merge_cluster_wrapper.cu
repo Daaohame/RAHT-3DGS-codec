@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <vector>
 
 // Include the kernel from merge_cluster.cu
@@ -45,6 +46,16 @@ std::vector<torch::Tensor> merge_clusters_cuda(
     TORCH_CHECK(scales.size(0) == N, "scales must have same length as means");
     TORCH_CHECK(opacities.size(0) == N, "opacities must have same length as means");
     TORCH_CHECK(colors.size(0) == N, "colors must have same length as means");
+
+    // Ensure all tensors are on the same device
+    at::cuda::CUDAGuard device_guard(cluster_indices.device());
+    TORCH_CHECK(cluster_indices.device() == cluster_offsets.device() &&
+                cluster_indices.device() == means.device() &&
+                cluster_indices.device() == quats.device() &&
+                cluster_indices.device() == scales.device() &&
+                cluster_indices.device() == opacities.device() &&
+                cluster_indices.device() == colors.device(),
+                "All input tensors must be on the same device");
 
     const int num_clusters = cluster_offsets.size(0) - 1;
     const int color_dim = colors.size(1);

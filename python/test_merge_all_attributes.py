@@ -22,10 +22,10 @@ from quality_eval import (
 )
 
 
-def load_3dgs_checkpoint(ckpt_path):
+def load_3dgs_checkpoint(ckpt_path, device='cuda'):
     """Load 3DGS checkpoint and extract Gaussian parameters."""
     print(f"Loading checkpoint from: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location='cuda', weights_only=True)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
 
     # Print checkpoint structure to understand the data format
     print("\nCheckpoint keys:")
@@ -38,7 +38,7 @@ def load_3dgs_checkpoint(ckpt_path):
     return checkpoint
 
 
-def extract_gaussian_params(checkpoint):
+def extract_gaussian_params(checkpoint, device='cuda'):
     """Extract Gaussian parameters from checkpoint."""
     # Checkpoint structure: checkpoint['splats'] contains the 3DGS data
     # with keys: ['means', 'opacities', 'quats', 'scales', 'sh0', 'shN']
@@ -58,19 +58,19 @@ def extract_gaussian_params(checkpoint):
     # Extract means (positions)
     if 'means' not in splats:
         raise ValueError("Missing 'means' in splats")
-    params['means'] = splats['means'].cuda().float()
+    params['means'] = splats['means'].to(device).float()
 
     # Extract quaternions (rotations)
     if 'quats' not in splats:
         raise ValueError("Missing 'quats' in splats")
-    params['quats'] = splats['quats'].cuda().float()
+    params['quats'] = splats['quats'].to(device).float()
     # Normalize quaternions
     params['quats'] = params['quats'] / params['quats'].norm(dim=1, keepdim=True)
 
     # Extract scales
     if 'scales' not in splats:
         raise ValueError("Missing 'scales' in splats")
-    params['scales'] = splats['scales'].cuda().float()
+    params['scales'] = splats['scales'].to(device).float()
     # Scales might be in log space, exponentiate if needed
     if params['scales'].min() < 0:
         params['scales'] = torch.exp(params['scales'])
@@ -78,7 +78,7 @@ def extract_gaussian_params(checkpoint):
     # Extract opacities
     if 'opacities' not in splats:
         raise ValueError("Missing 'opacities' in splats")
-    params['opacities'] = splats['opacities'].cuda().float().squeeze()
+    params['opacities'] = splats['opacities'].to(device).float().squeeze()
     # Opacities might be in logit space, apply sigmoid if needed
     if params['opacities'].min() < 0 or params['opacities'].max() > 1:
         params['opacities'] = torch.sigmoid(params['opacities'])
@@ -86,13 +86,13 @@ def extract_gaussian_params(checkpoint):
     # Extract colors from SH coefficients
     # Combine sh0 (DC component) and shN (higher order) if available
     if 'sh0' in splats:
-        sh0 = splats['sh0'].cuda().float()
+        sh0 = splats['sh0'].to(device).float()
         # Flatten if needed (e.g., [N, 3, 1] -> [N, 3])
         if sh0.ndim > 2:
             sh0 = sh0.reshape(sh0.shape[0], -1)
 
         if 'shN' in splats and splats['shN'] is not None:
-            shN = splats['shN'].cuda().float()
+            shN = splats['shN'].to(device).float()
             # Flatten if needed
             if shN.ndim > 2:
                 shN = shN.reshape(shN.shape[0], -1)
@@ -119,21 +119,22 @@ def create_cluster_labels(N, num_clusters, strategy='random'):
         raise ValueError(f"Unknown strategy: {strategy}")
 
 
-def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10):
+def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10, device='cuda'):
     """Main test function using voxelize_pc for positions and merge_cluster for attributes."""
 
     print("=" * 80)
     print("Testing voxelize_pc + merge_cluster with real 3DGS checkpoint")
     print("=" * 80)
+    print(f"Using device: {device}")
 
     # Load checkpoint
-    checkpoint = load_3dgs_checkpoint(ckpt_path)
+    checkpoint = load_3dgs_checkpoint(ckpt_path, device=device)
 
     # Extract Gaussian parameters
     print("\n" + "=" * 80)
     print("Extracting Gaussian parameters...")
     print("=" * 80)
-    params = extract_gaussian_params(checkpoint)
+    params = extract_gaussian_params(checkpoint, device=device)
 
     N = params['means'].shape[0]
     color_dim = params['colors'].shape[1]
@@ -154,7 +155,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
 
     print(f"  Warming up CUDA kernels...")
     for _ in range(3):
-        voxelize_pc_batched(params['means'], J=J, device='cuda')
+        voxelize_pc_batched(params['means'], J=J, device=device)
 
     torch.cuda.synchronize()
     voxel_start_time = time.time()
@@ -162,7 +163,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
         params['means'],  # Only positions, shape [N, 3]
         J=J,
-        device='cuda'
+        device=device
     )
 
     torch.cuda.synchronize()
@@ -184,12 +185,12 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     # Each point between voxel_indices[i] and voxel_indices[i+1] belongs to voxel i
     # We need to map this back to the original unsorted order
     voxel_counts_int = torch.diff(
-        torch.cat([voxel_indices, torch.tensor([N], device='cuda')])
+        torch.cat([voxel_indices, torch.tensor([N], device=device)])
     )
 
     # Create voxel_id for sorted points [N]
     voxel_id_sorted = torch.repeat_interleave(
-        torch.arange(Nvox, device='cuda'),
+        torch.arange(Nvox, device=device),
         voxel_counts_int
     )
 
@@ -197,7 +198,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     sort_idx = voxel_info['sort_idx']
 
     # Create inverse mapping to unsort cluster labels
-    cluster_labels = torch.zeros(N, dtype=torch.long, device='cuda')
+    cluster_labels = torch.zeros(N, dtype=torch.long, device=device)
     cluster_labels[sort_idx] = voxel_id_sorted
 
     unique_clusters = torch.unique(cluster_labels)
@@ -418,7 +419,8 @@ if __name__ == '__main__':
         results = test_merge_cluster(
             ckpt_path,
             J=10,  # Octree depth for voxelization
-            weight_by_opacity=True
+            weight_by_opacity=True,
+            device="cuda:1"
         )
 
         print("\n" + "=" * 80)

@@ -224,19 +224,6 @@ For typical workloads (thousands of Gaussians merged into hundreds of clusters),
 
 ## Troubleshooting
 
-### Import Error: "No module named 'merge_cluster_cuda'"
-
-The package hasn't been installed yet. Install it:
-```bash
-# Recommended: use pip
-pip install .
-
-# Or: build in-place (for development only, requires running from this directory)
-python setup.py build_ext --inplace
-```
-
-**Note:** If you used `build_ext --inplace`, the module is only available when running from this directory. Use `pip install .` for global availability.
-
 ### Import Error: "merge_cluster_cuda._C extension not found"
 
 This warning appears if the CUDA extension wasn't built properly. Make sure you:
@@ -259,6 +246,26 @@ Check your GPU compute capability with:
 import torch
 print(torch.cuda.get_device_capability())  # e.g., (8, 0) for sm_80
 ```
+
+### After Modifying CUDA Code
+
+**IMPORTANT**: When using editable install (`pip install -e .`), changes to `.cu` files require manually rebuilding the extension:
+
+```bash
+# Method 1: Use the provided rebuild script (recommended)
+./rebuild.sh
+
+# Method 2: Manual rebuild
+rm -f merge_cluster_cuda/_C.*.so
+python setup.py build_ext --inplace
+```
+
+**Why?** With editable installs, pip only creates a pointer to your source directory. It does NOT automatically recompile the `.so` file when you modify CUDA code. You must rebuild the extension manually after any changes to `.cu` files.
+
+If you skip this step, you may see errors like:
+- `undefined symbol: _ZN3c104cuda9SetDeviceEab` (PyTorch symbol mismatch)
+- `merge_cluster_cuda._C extension not found`
+- Old code behavior persisting despite changes
 
 ### Build Errors
 
