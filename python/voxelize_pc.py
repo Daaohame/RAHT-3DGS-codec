@@ -147,13 +147,16 @@ def voxelize_pc_batched(
         C0_voxelized = Cvox[voxel_id]
         DeltaC = C0 - C0_voxelized
 
-        Vvox = V0_integer[voxel_indices]
+        # V0_integer is in original order, voxel_indices are in sorted order
+        # Must sort V0_integer first before indexing with voxel_indices
+        Vvox = V0_integer[idx][voxel_indices]
         Cvox_output = Cvox
 
         PCvox = torch.cat([Vvox.float(), Cvox_output], dim=1)
         DeltaPC = torch.cat([DeltaV, DeltaC], dim=1)
     else:
-        Vvox = V0_integer[voxel_indices]
+        # V0_integer is in original order, voxel_indices are in sorted order
+        Vvox = V0_integer[idx][voxel_indices]
         PCvox = Vvox.float()
         DeltaPC = DeltaV
 

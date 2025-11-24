@@ -17,7 +17,7 @@ import os
 import time
 
 # Import merge_gaussian_clusters from the installed merge_cluster_cuda library
-from merge_cluster_cuda import merge_gaussian_clusters
+from merge_cluster_cuda import merge_gaussian_clusters_with_indices
 
 # Import from local python directory
 from voxelize_pc import voxelize_pc_batched
@@ -149,29 +149,30 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     print(f"📊 Compression ratio: {N / Nvox:.2f}x ({N} → {Nvox} Gaussians)")
     print(f"📏 Voxel size: {voxel_info['voxel_size']:.6f}")
 
-    # 2. Create cluster labels for merging
-    cluster_labels = torch.zeros(N, dtype=torch.long, device=device)
-    for voxel_id in range(Nvox):
-        start_idx = voxel_indices[voxel_id]
-        end_idx = voxel_indices[voxel_id + 1] if voxel_id < Nvox - 1 else N
-        cluster_labels[start_idx:end_idx] = voxel_id
-
-    # Unsort cluster labels to match original point order
+    # 2. Construct cluster indices directly from voxelization output
+    # sort_idx tells us which original Gaussian each sorted position corresponds to
+    # This is exactly what cluster_indices needs - an indirection array!
     sort_idx = voxel_info['sort_idx']
-    # Use scatter_ for efficient unsorting (avoid slow Python loop)
-    unsorted_cluster_labels = torch.zeros_like(cluster_labels)
-    unsorted_cluster_labels.scatter_(0, sort_idx, cluster_labels)
+    cluster_indices = sort_idx.int()
 
-    # 3. Merge all attributes
+    # cluster_offsets marks the boundaries of each cluster (voxel)
+    # voxel_indices already tells us where each voxel starts, just append N
+    cluster_offsets = torch.cat([
+        voxel_indices,
+        torch.tensor([N], dtype=torch.int32, device=device)
+    ]).int()
+
+    # 3. Merge all attributes (except positions, which are already quantized)
     # Warmup to avoid CUDA JIT compilation overhead
     for _ in range(3):
-        _ = merge_gaussian_clusters(
+        _ = merge_gaussian_clusters_with_indices(
             params['means'],
             params['quats'],
             params['scales'],
             params['opacities'],
             params['colors'],
-            unsorted_cluster_labels,
+            cluster_indices,
+            cluster_offsets,
             weight_by_opacity=True
         )
 
@@ -179,13 +180,14 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     merge_start_time = time.time()
 
     merged_means, merged_quats, merged_scales, merged_opacities, merged_colors = \
-        merge_gaussian_clusters(
+        merge_gaussian_clusters_with_indices(
             params['means'],
             params['quats'],
             params['scales'],
             params['opacities'],
             params['colors'],
-            unsorted_cluster_labels,
+            cluster_indices,
+            cluster_offsets,
             weight_by_opacity=True
         )
 
@@ -195,8 +197,11 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     print(f"⏱️  Attribute merging time: {merge_elapsed_time*1000:.2f} ms")
     print(f"⏱️  Total compression time: {(voxel_elapsed_time + merge_elapsed_time)*1000:.2f} ms")
 
-    # Note: merged_means is already computed by merge_gaussian_clusters
-    # It contains the merged positions (Nvox voxel centers)
+    # Use PCvox integer positions instead of merged_means
+    # PCvox[:, :3] contains integer voxel coordinates - this is what RAHT needs
+    # For rendering/PLY, convert back to world coordinates (voxel centers)
+    voxel_positions_int = PCvox[:, :3]  # Integer voxel coordinates [0, 2^J - 1]
+    voxel_positions_world = (voxel_positions_int + 0.5) * voxel_info['voxel_size'] + voxel_info['vmin']
 
     # 4. Save compressed PLY files
     os.makedirs(output_dir, exist_ok=True)
@@ -206,9 +211,9 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     save_ply(original_ply_path, params['means'], params['quats'], params['scales'],
              params['opacities'], params['colors'])
 
-    # Save compressed Nvox Gaussians
+    # Save compressed Nvox Gaussians (using voxel center positions, not weighted means)
     compressed_ply_path = os.path.join(output_dir, "compressed_Nvox_gaussians.ply")
-    save_ply(compressed_ply_path, merged_means, merged_quats, merged_scales,
+    save_ply(compressed_ply_path, voxel_positions_world, merged_quats, merged_scales,
              merged_opacities, merged_colors)
 
     # 5. File size comparison
@@ -240,8 +245,10 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     }
 
     # Prepare compressed params (Nvox Gaussians - NO expansion!)
+    # Use voxel center positions (quantized) instead of weighted means
+    # This reflects actual compression: integer positions → world coords
     compressed_params = {
-        'means': merged_means,
+        'means': voxel_positions_world,
         'quats': merged_quats,
         'scales': merged_scales,
         'opacities': merged_opacities,
@@ -280,7 +287,7 @@ if __name__ == '__main__':
             ckpt_path,
             J=10,  # Octree depth for voxelization
             output_dir="output_compressed",
-            device="cuda:1"  # Change to "cuda:0", "cuda:1", etc. to use a specific GPU
+            device="cuda:0"  # Change to "cuda:0", "cuda:1", etc. to use a specific GPU
         )
 
         print("\n" + "=" * 80)
@@ -296,17 +303,6 @@ if __name__ == '__main__':
             render_metrics = results['rendering_metrics']
             print(f"🎨 PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
             print(f"   Range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
-
-        print("\n" + "=" * 80)
-        print("INTERPRETATION")
-        print("=" * 80)
-        print("This PSNR measures COMPRESSION quality (N→Nvox reduction):")
-        print(f"  - Fewer Gaussians: {results['original_count']} → {results['compressed_count']}")
-        print(f"  - Quality loss from both: reduced density + attribute merging")
-        print(f"  - Use case: Deployment (streaming, LOD, mobile rendering)")
-        print("\nCompare with test_merge_all_attributes.py (~40 dB):")
-        print("  - That script expands to N for fair quantization evaluation")
-        print("  - This script uses Nvox for realistic compression evaluation")
 
     except Exception as e:
         print(f"\nError during processing: {e}")
