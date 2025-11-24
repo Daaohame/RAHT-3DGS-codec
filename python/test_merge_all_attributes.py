@@ -26,33 +26,15 @@ def load_3dgs_checkpoint(ckpt_path, device='cuda'):
     """Load 3DGS checkpoint and extract Gaussian parameters."""
     print(f"Loading checkpoint from: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
-
-    # Print checkpoint structure to understand the data format
-    print("\nCheckpoint keys:")
-    for key in checkpoint.keys():
-        if isinstance(checkpoint[key], torch.Tensor):
-            print(f"  {key}: {checkpoint[key].shape} ({checkpoint[key].dtype})")
-        else:
-            print(f"  {key}: {type(checkpoint[key])}")
-
     return checkpoint
 
 
 def extract_gaussian_params(checkpoint, device='cuda'):
     """Extract Gaussian parameters from checkpoint."""
-    # Checkpoint structure: checkpoint['splats'] contains the 3DGS data
-    # with keys: ['means', 'opacities', 'quats', 'scales', 'sh0', 'shN']
-
     if 'splats' not in checkpoint:
         raise ValueError("Checkpoint does not contain 'splats' key")
 
     splats = checkpoint['splats']
-
-    print("\nSplats keys:")
-    for key in splats.keys():
-        if isinstance(splats[key], torch.Tensor):
-            print(f"  {key}: {splats[key].shape} ({splats[key].dtype})")
-
     params = {}
 
     # Extract means (positions)
@@ -123,37 +105,24 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     """Main test function using voxelize_pc for positions and merge_cluster for attributes."""
 
     print("=" * 80)
-    print("Testing voxelize_pc + merge_cluster with real 3DGS checkpoint")
+    print("Testing Quantization + Merging Pipeline")
     print("=" * 80)
     print(f"Using device: {device}")
 
     # Load checkpoint
     checkpoint = load_3dgs_checkpoint(ckpt_path, device=device)
-
-    # Extract Gaussian parameters
-    print("\n" + "=" * 80)
-    print("Extracting Gaussian parameters...")
-    print("=" * 80)
     params = extract_gaussian_params(checkpoint, device=device)
 
     N = params['means'].shape[0]
     color_dim = params['colors'].shape[1]
-
-    print(f"\nExtracted parameters:")
-    print(f"  Number of Gaussians: {N}")
-    print(f"  Means shape: {params['means'].shape}")
-    print(f"  Quats shape: {params['quats'].shape}")
-    print(f"  Scales shape: {params['scales'].shape}")
-    print(f"  Opacities shape: {params['opacities'].shape}")
-    print(f"  Colors shape: {params['colors'].shape}")
-    print(f"  Color dimension: {color_dim}")
+    print(f"Number of Gaussians: {N}")
 
     # Step 1: Quantize positions only
     print(f"\n" + "=" * 80)
-    print(f"Step 1: Quantizing positions (J={J})...")
+    print(f"QUANTIZATION PIPELINE (J={J})")
     print("=" * 80)
 
-    print(f"  Warming up CUDA kernels...")
+    # Warmup
     for _ in range(3):
         voxelize_pc_batched(params['means'], J=J, device=device)
 
@@ -171,46 +140,26 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
 
     Nvox = voxel_info['Nvox']
 
-    print(f"  Quantization completed in {voxel_elapsed_time*1000:.2f} ms")
-    print(f"  Input Gaussians: {N}")
-    print(f"  Output voxels: {Nvox}")
-    print(f"  Voxel size: {voxel_info['voxel_size']:.6f}")
-    print(f"  Compression ratio: {N / Nvox:.2f}x")
+    print(f"⏱️  Voxelization time: {voxel_elapsed_time*1000:.2f} ms")
+    print(f"📊 Compression ratio: {N / Nvox:.2f}x ({N} → {Nvox} Gaussians)")
+    print(f"📏 Voxel size: {voxel_info['voxel_size']:.6f}")
 
     # Step 2: Create cluster labels from voxel assignments
-    print(f"\n" + "=" * 80)
-    print(f"Step 2: Creating cluster labels from voxel assignments...")
-    print("=" * 80)
-
-    # Each point between voxel_indices[i] and voxel_indices[i+1] belongs to voxel i
-    # We need to map this back to the original unsorted order
     voxel_counts_int = torch.diff(
         torch.cat([voxel_indices, torch.tensor([N], device=device)])
     )
 
-    # Create voxel_id for sorted points [N]
     voxel_id_sorted = torch.repeat_interleave(
         torch.arange(Nvox, device=device),
         voxel_counts_int
     )
 
-    # Use the sort indices returned by voxelize_pc (no need to recalculate Morton codes)
     sort_idx = voxel_info['sort_idx']
-
-    # Create inverse mapping to unsort cluster labels
     cluster_labels = torch.zeros(N, dtype=torch.long, device=device)
     cluster_labels[sort_idx] = voxel_id_sorted
 
-    unique_clusters = torch.unique(cluster_labels)
-    print(f"  Created {len(unique_clusters)} unique clusters (should equal {Nvox} voxels)")
-
     # Step 3: Merge attributes using cluster labels
-    print(f"\n" + "=" * 80)
-    print(f"Step 3: Merging attributes with merge_cluster (weight_by_opacity={weight_by_opacity})...")
-    print("=" * 80)
-
-    # Warmup to avoid CUDA JIT compilation overhead
-    print(f"  Warming up CUDA kernels...")
+    # Warmup
     for _ in range(3):
         _ = merge_gaussian_clusters(
             params['means'],
@@ -239,79 +188,31 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
     torch.cuda.synchronize()
     elapsed_time = time.time() - start_time
 
+    print(f"⏱️  Attribute merging time: {elapsed_time*1000:.2f} ms")
+    print(f"⏱️  Total time: {(voxel_elapsed_time + elapsed_time)*1000:.2f} ms")
+
     # Step 4: Use voxelized positions instead of merged positions
-    print(f"\n" + "=" * 80)
-    print(f"Step 4: Replacing merged positions with quantized voxelized positions...")
-    print("=" * 80)
-
-    # Verify that all quantized positions are integers (as expected from voxelization)
-    is_integer = torch.all(PCvox == torch.floor(PCvox))
-    print(f"  All quantized positions are integers: {is_integer.item()}")
-
-    if is_integer:
-        print(f"  Quantized position range:")
-        print(f"    Min: {PCvox.min(dim=0)[0].cpu().numpy()}")
-        print(f"    Max: {PCvox.max(dim=0)[0].cpu().numpy()}")
-
     # PCvox is [Nvox, 3] with integer voxel coordinates
-    # convert back to world coordinates: world_pos = vmin + voxel_coords * voxel_size
-    merged_means = voxel_info['vmin'].unsqueeze(0) + PCvox * voxel_info['voxel_size']
-
-    # Print results
-    print(f"\nMerge completed successfully!")
-    print(f"  Voxelization time: {voxel_elapsed_time*1000:.2f} ms")
-    print(f"  Attribute merging time: {elapsed_time*1000:.2f} ms")
-    print(f"  Total time: {(voxel_elapsed_time + elapsed_time)*1000:.2f} ms")
-    print(f"  Input Gaussians: {N}")
-    print(f"  Output clusters: {merged_means.shape[0]}")
-    print(f"  Compression ratio: {N / merged_means.shape[0]:.2f}x")
-
-    print(f"\nMerged tensor shapes:")
-    print(f"  Means (from voxelize_pc): {merged_means.shape}")
-    print(f"  Quats (from merge_cluster): {merged_quats.shape}")
-    print(f"  Scales (from merge_cluster): {merged_scales.shape}")
-    print(f"  Opacities (from merge_cluster): {merged_opacities.shape}")
-    print(f"  Colors (from merge_cluster): {merged_colors.shape}")
-
+    # convert back to world coordinates at voxel centers: world_pos = vmin + (voxel_coords + 0.5) * voxel_size
+    merged_means = voxel_info['vmin'].unsqueeze(0) + (PCvox + 0.5) * voxel_info['voxel_size']
 
     # Verify results
-    print(f"\n" + "=" * 80)
-    print("Verifying results...")
-    print("=" * 80)
-
-    # Check quaternion normalization
     quat_norms = merged_quats.norm(dim=1)
-    print(f"  Quaternion norms: min={quat_norms.min():.6f}, max={quat_norms.max():.6f}, mean={quat_norms.mean():.6f}")
     assert torch.allclose(quat_norms, torch.ones_like(quat_norms), atol=1e-5), "Quaternions not normalized!"
-
-    # Check opacity range
-    print(f"  Opacity range: min={merged_opacities.min():.6f}, max={merged_opacities.max():.6f}")
     assert merged_opacities.min() >= 0 and merged_opacities.max() <= 1, "Opacities out of range!"
-
-    # Check for NaN/Inf
     for name, tensor in [('means', merged_means), ('quats', merged_quats),
                           ('scales', merged_scales), ('opacities', merged_opacities),
                           ('colors', merged_colors)]:
         has_nan = torch.isnan(tensor).any()
         has_inf = torch.isinf(tensor).any()
-        print(f"  {name}: NaN={has_nan}, Inf={has_inf}")
         assert not has_nan and not has_inf, f"{name} contains NaN or Inf!"
-
-    print(f"\n" + "=" * 80)
-    print("All tests passed!")
-    print("=" * 80)
 
     # Quality Evaluation
     print(f"\n" + "=" * 80)
-    print("Quality Evaluation")
+    print("QUALITY EVALUATION")
     print("=" * 80)
 
-    # 1. Compute attribute quality metrics
-    print("\nComputing attribute quality metrics...")
-
-    # Fix: Use direct position calculation instead of merged_means[cluster_labels]
-    # The cluster_labels indexing into merged_means can be incorrect due to Morton ordering
-    print(f"  Using direct voxel center calculation for positions instead of cluster_labels indexing")
+    # Compute attribute quality metrics
     original_voxel_indices_direct = torch.floor((params['means'] - voxel_info['vmin'].unsqueeze(0)) / voxel_info['voxel_size']).long()
     reconstructed_means_correct = voxel_info['vmin'].unsqueeze(0) + (original_voxel_indices_direct.float() + 0.5) * voxel_info['voxel_size']
 
@@ -321,27 +222,19 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
         params['scales'],
         params['opacities'],
         params['colors'],
-        reconstructed_means_correct,  # Use corrected positions
+        reconstructed_means_correct,
         merged_quats,
         merged_scales,
         merged_opacities,
         merged_colors,
         cluster_labels
     )
-    print_metrics(metrics, "Attribute Quality Metrics")
 
-    # 2. Save PLY files for visualization
-    print(f"\n" + "=" * 80)
-    print("Saving PLY files for visualization...")
-    print("=" * 80)
-
-    # Create output directory
+    # Save PLY files
     output_dir = "output_ply"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Save original Gaussians
     original_ply_path = os.path.join(output_dir, "original_gaussians.ply")
-    print(f"\nSaving original Gaussians to {original_ply_path}...")
     save_ply(
         original_ply_path,
         params['means'],
@@ -351,9 +244,7 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
         params['colors']
     )
 
-    # Save merged Gaussians
     merged_ply_path = os.path.join(output_dir, "merged_gaussians.ply")
-    print(f"\nSaving merged Gaussians to {merged_ply_path}...")
     save_ply(
         merged_ply_path,
         merged_means,
@@ -362,14 +253,6 @@ def test_merge_cluster(ckpt_path, num_clusters=100, weight_by_opacity=True, J=10
         merged_opacities,
         merged_colors
     )
-
-    # 3. Try rendering comparison (if gsplat is available)
-    # Expand merged attributes back to N Gaussians for fair comparison
-    # Use quantized positions with merged other attributes
-    print(f"\n" + "=" * 80)
-    print("Preparing quantized Gaussians for rendering comparison...")
-    print("=" * 80)
-    print(f"  Expanding {Nvox} merged Gaussians to {N} quantized Gaussians")
 
     quantized_params = {
         'means': reconstructed_means_correct,  # Quantized positions (expanded to N)
@@ -424,34 +307,18 @@ if __name__ == '__main__':
         )
 
         print("\n" + "=" * 80)
-        print("Summary:")
+        print("QUANTIZATION RESULTS SUMMARY")
         print("=" * 80)
-        print(f"  Original Gaussians: {results['original_count']}")
-        print(f"  Merged Clusters: {results['merged_count']}")
-        print(f"  Compression: {results['compression_ratio']:.2f}x")
-        print(f"  Voxelization time: {results['voxel_time_ms']:.2f} ms")
-        print(f"  Attribute merging time: {results['merge_time_ms']:.2f} ms")
-        print(f"  Total execution time: {results['total_time_ms']:.2f} ms")
-
-        print("\nAttribute Quality Metrics:")
-        metrics = results['quality_metrics']
-        print(f"  Quaternion mean dist: {metrics['quaternion_mean_dist']:.6e}")
+        print(f"Gaussians: {results['original_count']} → {results['merged_count']} ({results['compression_ratio']:.2f}x)")
+        print(f"⏱️  Total time: {results['total_time_ms']:.2f} ms")
+        print(f"  ├─ Voxelization: {results['voxel_time_ms']:.2f} ms")
+        print(f"  └─ Merging: {results['merge_time_ms']:.2f} ms")
 
         # Show rendering metrics if available
         if results['rendering_metrics']:
             render_metrics = results['rendering_metrics']
-            print("\nRendering Quality Metrics:")
-            print(f"  PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
-            print(f"  PSNR range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
-            print(f"  Original render time: {render_metrics['original_render_time_ms']:.2f} ms")
-            print(f"  Merged render time: {render_metrics['merged_render_time_ms']:.2f} ms")
-
-        print("\nOutput Files:")
-        print(f"  Original PLY: {results['original_ply_path']}")
-        print(f"  Merged PLY: {results['merged_ply_path']}")
-
-        if results['rendering_metrics']:
-            print(f"  Rendered images: output_ply/renders/")
+            print(f"🎨 PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
+            print(f"   Range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
 
     except Exception as e:
         print(f"\nError during testing: {e}")

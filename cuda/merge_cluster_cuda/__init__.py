@@ -37,6 +37,18 @@ def prepare_cluster_data(cluster_labels: torch.Tensor) -> Tuple[torch.Tensor, to
     Returns:
         cluster_indices: [total_clustered] flat indices of Gaussians in each cluster
         cluster_offsets: [num_clusters + 1] boundaries marking cluster starts/ends
+        
+    Example:
+        cluster_labels = [2, 0, 2, 1, 0, 2]  # 6 Gaussians, 3 clusters (0, 1, 2)
+        #                 ↑  ↑  ↑  ↑  ↑  ↑
+        #                 0  1  2  3  4  5  ← Gaussian indices
+        cluster_indices = [1, 4, 3, 0, 2, 5]  # Sorted by cluster ID
+        cluster_offsets = [0, 2, 3, 6]        # Cluster boundaries
+    
+    How to use:
+        start = cluster_offsets[i]
+        end = cluster_offsets[i + 1]
+        gaussians_in_cluster_i = cluster_indices[start:end]
     """
     device = cluster_labels.device
 
@@ -86,16 +98,6 @@ def merge_gaussian_clusters(
     Returns:
         Tuple of (merged_means, merged_quats, merged_scales, merged_opacities, merged_colors)
         Each tensor has shape [num_clusters, ...] where num_clusters is the number of unique clusters
-
-    Example:
-        >>> means = torch.randn(1000, 3, device='cuda')
-        >>> quats = torch.randn(1000, 4, device='cuda')
-        >>> quats = quats / quats.norm(dim=1, keepdim=True)  # normalize
-        >>> scales = torch.rand(1000, 3, device='cuda')
-        >>> opacities = torch.rand(1000, device='cuda')
-        >>> colors = torch.randn(1000, 48, device='cuda')  # e.g., 16 SH coefficients * 3 channels
-        >>> cluster_labels = torch.randint(0, 100, (1000,), device='cuda')
-        >>> merged = merge_gaussian_clusters(means, quats, scales, opacities, colors, cluster_labels)
     """
     if not _extension_available:
         raise RuntimeError(
@@ -158,7 +160,6 @@ def merge_gaussian_clusters_with_indices(
     Low-level interface: merge clusters using pre-computed cluster_indices and cluster_offsets.
 
     This is useful if you already have the cluster data in the required format.
-    Most users should use merge_gaussian_clusters() instead.
 
     Args:
         means: [N, 3] tensor of Gaussian means
