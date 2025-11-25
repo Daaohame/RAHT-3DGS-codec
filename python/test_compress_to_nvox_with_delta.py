@@ -125,24 +125,16 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
     for _ in range(3):
         voxelize_pc_batched(positions, J=J, device=device)
 
-    # Timed voxelization
     print(f"\n" + "=" * 80)
     print(f"COMPRESSION PIPELINE (J={J})")
     print("=" * 80)
-
-    torch.cuda.synchronize()
-    voxel_start_time = time.time()
 
     PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
         positions, J=J, device=device
     )
 
-    torch.cuda.synchronize()
-    voxel_elapsed_time = time.time() - voxel_start_time
-
     Nvox = voxel_info['Nvox']
 
-    print(f"Voxelization time: {voxel_elapsed_time*1000:.2f} ms")
     print(f"Compression ratio: {N / Nvox:.2f}x ({N} → {Nvox} Gaussians)")
     print(f"Voxel size: {voxel_info['voxel_size']:.6f}")
 
@@ -169,9 +161,6 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
             weight_by_opacity=True
         )
 
-    torch.cuda.synchronize()
-    merge_start_time = time.time()
-
     merged_means, merged_quats, merged_scales, merged_opacities, merged_colors = \
         merge_gaussian_clusters_with_indices(
             params['means'],
@@ -183,12 +172,6 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
             cluster_offsets,
             weight_by_opacity=True
         )
-
-    torch.cuda.synchronize()
-    merge_elapsed_time = time.time() - merge_start_time
-
-    print(f"Attribute merging time: {merge_elapsed_time*1000:.2f} ms")
-    print(f"Total compression time: {(voxel_elapsed_time + merge_elapsed_time)*1000:.2f} ms")
 
     # 4. Compute position delta
     # PCvox[:, :3] contains integer voxel coordinates
@@ -282,9 +265,6 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
         'original_count': N,
         'compressed_count': Nvox,
         'compression_ratio': N / Nvox,
-        'voxel_time_ms': voxel_elapsed_time * 1000,
-        'merge_time_ms': merge_elapsed_time * 1000,
-        'total_time_ms': (voxel_elapsed_time + merge_elapsed_time) * 1000,
         'original_size_mb': original_size / 1024 / 1024,
         'compressed_size_mb': compressed_size / 1024 / 1024,
         'size_reduction_percent': size_reduction,
@@ -314,9 +294,6 @@ if __name__ == '__main__':
         print("COMPRESSION RESULTS SUMMARY")
         print("=" * 80)
         print(f"Gaussians: {results['original_count']} → {results['compressed_count']} ({results['compression_ratio']:.2f}x)")
-        print(f"Total compression time: {results['total_time_ms']:.2f} ms")
-        print(f"  Voxelization: {results['voxel_time_ms']:.2f} ms")
-        print(f"  Merging: {results['merge_time_ms']:.2f} ms")
         print(f"File size: {results['original_size_mb']:.2f} MB → {results['compressed_size_mb']:.2f} MB ({results['size_reduction_percent']:.1f}% reduction)")
         print(f"\nPosition Delta:")
         print(f"  Mean magnitude: {results['delta_mean_magnitude']:.6f}")
