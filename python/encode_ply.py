@@ -16,7 +16,7 @@ import rlgr
 ## ---------------------
 torch.backends.cudnn.benchmark=False # for benchmarking
 DEBUG = False
-device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 raht_fn = {
     "RAHT": RAHT2_optimized,
     "iRAHT": inverse_RAHT_optimized,
@@ -32,7 +32,6 @@ nSteps = len(colorStep)
 rates = torch.zeros((T, nSteps), dtype=torch.float64)
 raht_param_time = torch.zeros((T, nSteps), dtype=torch.float64)
 raht_transform_time = torch.zeros((T, nSteps), dtype=torch.float64)
-order_RAGFT_time = torch.zeros((T, nSteps), dtype=torch.float64)
 quant_time = torch.zeros((T, nSteps), dtype=torch.float64)
 entropy_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)
 entropy_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)
@@ -55,7 +54,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logger.info("Frame,Quantization_Step,Rate_bpp,RAHT_prelude_time,RAHT_transform_time,order_RAGFT_time,Quant_time,Entropy_enc_time,Entropy_dec_time,Dequant_time,iRAHT_time,psnr")
+logger.info("Frame,Quantization_Step,Rate_bpp,RAHT_prelude_time,RAHT_transform_time,Quant_time,Entropy_enc_time,Entropy_dec_time,Dequant_time,iRAHT_time,psnr")
 
 
 ## ---------------------
@@ -129,11 +128,14 @@ for frame_idx in range(T):
         save_mat(Coeff, f"../results/frame{frame}_coeff_python.mat")
         print(f"Norm of C: {torch.norm(C)}")
         print(f"Norm of Coeff: {torch.norm(Coeff)}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
-        print(f"Sanity check: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
-        C_recon = inverse_RAHT_optimized(Coeff, ListC, FlagsC, weightsC)
-        print(f"Reconstruction check: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
+        print(f"Sanity check Y: {sanity_check_vector(Coeff[:, 0], C[:, 0])}")
+        print(f"Sanity check U: {sanity_check_vector(Coeff[:, 1], C[:, 1])}")
+        print(f"Sanity check V: {sanity_check_vector(Coeff[:, 2], C[:, 2])}")
+        # Verify lossless RAHT (use same function as production code)
+        C_recon = raht_fn["iRAHT"](Coeff, ListC, FlagsC, weightsC)
+        raht_error = torch.abs(C - C_recon).max()
+        print(f"Lossless RAHT max error: {raht_error:.2e}")
+        print(f"Lossless RAHT check passes: {torch.allclose(C, C_recon, rtol=1e-5, atol=1e-8)}")
 
     # Sort weights in descending order
     # values, order_RAHT = torch.sort(w.squeeze(1), descending=True)
@@ -181,6 +183,8 @@ for frame_idx in range(T):
             m_read.close()
             assert len(out) == original_len, f"Length mismatch for {name}: {len(out)} != {original_len}"
             decoded[name] = {"out": out, "time_ns": decode_time_ns}
+            # Verify RLGR roundtrip correctness
+            assert decoded[name]["out"] == original, f"RLGR roundtrip failed for {name}: decoded values don't match encoded values"
             # print(f"{name}: read {len(out)} elems in {decode_time_ns} ns")
         
         size_bytes = sum(len(b['buf']) for b in compressed.values())
@@ -203,11 +207,16 @@ for frame_idx in range(T):
         Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
         C_rec = raht_fn["iRAHT"](Coeff_dec, ListC, FlagsC, weightsC)
         iRAHT_time[frame_idx, i] = time.time() - start_time
-        # print(f"Reconstruction check: {torch.allclose(C, C_rec, rtol=1e-5, atol=1e-8)}")
+
+        # Verify full pipeline reconstruction (quantization causes expected loss)
+        if DEBUG and i == 0:  # Only check for step=1 (minimal quantization)
+            reconstruction_error = torch.abs(C - C_rec).max()
+            print(f"Full pipeline reconstruction error (step={step}): {reconstruction_error:.6e}")
+            print(f"Reconstruction check passes: {torch.allclose(C, C_rec, rtol=1e-3, atol=step)}")
         
         logger.info(
             f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
-            f"{order_RAGFT_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
+            f"{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
             f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},{psnr[frame_idx, i]:.6f}")
 
     print(f"Frame {frame}")

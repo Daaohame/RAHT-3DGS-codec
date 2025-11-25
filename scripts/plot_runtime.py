@@ -20,7 +20,6 @@ else:
 runtime_cols = [
     'RAHT_prelude_time',
     'RAHT_transform_time',
-    # 'order_RAGFT_time',
     # 'Quant_time',
     'Entropy_enc_time',
     'Entropy_dec_time',
@@ -31,7 +30,6 @@ runtime_cols = [
 legend_names = {
     'RAHT_prelude_time': 'RAHT Prelude',
     'RAHT_transform_time': 'RAHT Transform',
-    # 'order_RAGFT_time': 'Order_RAGFT',
     'Quant_time': 'Quantization',
     'Entropy_enc_time': 'Entropy Encoding',
     'Entropy_dec_time': 'Entropy Decoding',
