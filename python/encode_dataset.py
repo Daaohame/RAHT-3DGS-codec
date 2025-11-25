@@ -175,7 +175,6 @@ for frame_idx in range(T):
             m_write.close()
             buf = m_write.get_buffer()              # list[uint8] (bytes-like)
             compressed[name] = {"buf": buf, "time_ns": encode_time_ns}
-            # print(f"{name}: wrote {len(buf)} bytes in {encode_time_ns} ns")
         
         # decode
         for name, original in channels.items():

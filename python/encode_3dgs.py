@@ -2,8 +2,8 @@ import torch
 import numpy as np
 import time
 import logging
-import struct
 import math
+import os
 
 from data_util import read_compressed_3dgs_ply
 from utils import save_mat, save_lists, sanity_check_vector
@@ -42,7 +42,6 @@ entropy_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)
 entropy_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)
 dequant_time = torch.zeros((T, nSteps), dtype=torch.float64)
 iRAHT_time = torch.zeros((T, nSteps), dtype=torch.float64)
-MSE = torch.zeros((T, nSteps), dtype=torch.float64)
 psnr = torch.zeros((T, nSteps), dtype=torch.float64)
 Nvox = torch.zeros(T)
 
@@ -73,9 +72,10 @@ def to_dev(x):
 
 ## One dummy iteration to warm up GPU
 print("Warming up GPU with a dummy iteration...")
-V_dummy, attributes_dummy = read_compressed_3dgs_ply(ply_list[0])
-if V_dummy is None:
+result_dummy = read_compressed_3dgs_ply(ply_list[0])
+if result_dummy is None:
     raise RuntimeError(f"Failed to load dummy frame from {ply_list[0]}")
+V_dummy, attributes_dummy, _, _ = result_dummy  # Unpack 4 values, ignore voxel_size and vmin for warmup
 
 attributes_dummy = attributes_dummy.to(dtype=DTYPE).contiguous()
 C_dummy = to_dev(attributes_dummy)
@@ -111,7 +111,12 @@ print(f"\nStarting processing for {T} frames...")
 for frame_idx in range(T):
     frame = frame_idx + 1
 
-    V_quantized, attributes = read_compressed_3dgs_ply(ply_list[frame_idx])
+    V_quantized, attributes, voxel_size, vmin = read_compressed_3dgs_ply(ply_list[frame_idx])
+    print(f"Loaded PLY: {V_quantized.shape[0]} Gaussians")
+    print(f"  Integer positions shape: {V_quantized.shape}, range: [{V_quantized.min()}, {V_quantized.max()}]")
+    print(f"  Attributes shape: {attributes.shape}")
+    print(f"  Voxel metadata: voxel_size={voxel_size:.6f}, vmin={vmin.tolist()}")
+
     N = V_quantized.shape[0]
     n_channels = attributes.shape[1]
     Nvox[frame_idx] = N
@@ -134,6 +139,7 @@ for frame_idx in range(T):
     start_time = time.time()
     Coeff, w = raht_fn["RAHT"](C, ListC, FlagsC, weightsC)
     raht_transform_time[frame_idx, :] = time.time() - start_time
+    print(f"RAHT transform complete. Coeff shape: {Coeff.shape}")
 
     if DEBUG:
         save_lists(f"../results/frame{frame}_params_python.mat", ListC=ListC, FlagsC=FlagsC, weightsC=weightsC)
@@ -172,14 +178,38 @@ for frame_idx in range(T):
     # Loop through quantization steps
     for i in range(nSteps):
         step = colorStep[i]
+
+        # Analyze quantization appropriateness
+        if DEBUG and i == 0:
+            print(f"\n=== QUANTIZATION ANALYSIS (step={step}) ===")
+            # Compute coefficient ranges per attribute type
+            coeff_quats = Coeff[:, 0:4]
+            coeff_scales = Coeff[:, 4:7]
+            coeff_opacity = Coeff[:, 7]
+            coeff_colors = Coeff[:, 8:]
+
+            print(f"Coefficient ranges (before quantization):")
+            print(f"  Quats (ch 0-3):   [{coeff_quats.min():.4f}, {coeff_quats.max():.4f}], range={coeff_quats.max()-coeff_quats.min():.4f}")
+            print(f"  Scales (ch 4-6):  [{coeff_scales.min():.4f}, {coeff_scales.max():.4f}], range={coeff_scales.max()-coeff_scales.min():.4f}")
+            print(f"  Opacity (ch 7):   [{coeff_opacity.min():.4f}, {coeff_opacity.max():.4f}], range={coeff_opacity.max()-coeff_opacity.min():.4f}")
+            print(f"  Colors (ch 8+):   [{coeff_colors.min():.4f}, {coeff_colors.max():.4f}], range={coeff_colors.max()-coeff_colors.min():.4f}")
+
+            print(f"\nQuantization step={step} relative to coefficient ranges:")
+            print(f"  Quats:   step/range = {step/(coeff_quats.max()-coeff_quats.min()+1e-10):.4f} ({step/(coeff_quats.max()-coeff_quats.min()+1e-10)*100:.1f}%)")
+            print(f"  Scales:  step/range = {step/(coeff_scales.max()-coeff_scales.min()+1e-10):.4f} ({step/(coeff_scales.max()-coeff_scales.min()+1e-10)*100:.1f}%)")
+            print(f"  Opacity: step/range = {step/(coeff_opacity.max()-coeff_opacity.min()+1e-10):.4f} ({step/(coeff_opacity.max()-coeff_opacity.min()+1e-10)*100:.1f}%)")
+            print(f"  Colors:  step/range = {step/(coeff_colors.max()-coeff_colors.min()+1e-10):.4f} ({step/(coeff_colors.max()-coeff_colors.min()+1e-10)*100:.1f}%)")
+
+            print(f"\nNumber of quantization levels:")
+            print(f"  Quats:   {int((coeff_quats.max()-coeff_quats.min())/step + 1)} levels")
+            print(f"  Scales:  {int((coeff_scales.max()-coeff_scales.min())/step + 1)} levels")
+            print(f"  Opacity: {int((coeff_opacity.max()-coeff_opacity.min())/step + 1)} levels")
+            print(f"  Colors:  {int((coeff_colors.max()-coeff_colors.min())/step + 1)} levels")
+            print(f"===========================================\n")
+
         start_time = time.time()
         Coeff_enc = torch.floor(Coeff / step + 0.5)
         quant_time[frame_idx, i] = time.time() - start_time
-
-        # Compute MSE and PSNR on first channel (quaternion w component)
-        ch0_hat = Coeff_enc[:, 0] * step
-        MSE[frame_idx, i] = (torch.linalg.norm(Coeff[:,0] - ch0_hat)**2) / N
-        psnr[frame_idx, i] = -10 * torch.log10(MSE[frame_idx, i] + 1e-10)
 
         # Get reordered coefficients
         coeff_reordered = Coeff_enc.index_select(0, order_RAGFT)
@@ -255,6 +285,89 @@ for frame_idx in range(T):
             print(f"Full pipeline reconstruction error (step={step}): {reconstruction_error:.6e}")
             print(f"Reconstruction check passes: {torch.allclose(C, C_rec, rtol=1e-3, atol=step)}")
             print(f"PSNR breakdown: All={psnr[frame_idx, i]:.2f}, Quats={psnr_quats:.2f}, Scales={psnr_scales:.2f}, Opacity={psnr_opacity:.2f}, Colors={psnr_colors:.2f}")
+
+            # Render reconstructed 3DGS for visual quality check
+            print(f"\n=== RENDERING RECONSTRUCTED 3DGS (step={step}) ===")
+
+            # Convert integer positions to world coordinates using stored voxel_size and vmin
+            voxel_positions_world = (V_quantized.float() + 0.5) * voxel_size + vmin
+
+            print(f"  Integer position range: [{V_quantized.min()}, {V_quantized.max()}]")
+            print(f"  World position range: [{voxel_positions_world.min():.4f}, {voxel_positions_world.max():.4f}]")
+            print(f"  Voxel metadata: voxel_size={voxel_size:.6f}, vmin={vmin.tolist()}")
+
+            # Split reconstructed attributes
+            C_rec_cpu = C_rec.cpu()
+            recon_quats = C_rec_cpu[:, 0:4]
+            recon_scales = C_rec_cpu[:, 4:7]
+            recon_opacities = C_rec_cpu[:, 7]
+            recon_colors = C_rec_cpu[:, 8:]
+
+            # Normalize quaternions (handle zero-norm case)
+            quat_norms = recon_quats.norm(dim=1, keepdim=True)
+            zero_norm_mask = (quat_norms.squeeze() < 1e-8)
+            if zero_norm_mask.any():
+                print(f"  Warning: {zero_norm_mask.sum()} quaternions have zero norm after reconstruction")
+                identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=recon_quats.dtype, device=recon_quats.device)
+                recon_quats[zero_norm_mask] = identity_quat
+                quat_norms = recon_quats.norm(dim=1, keepdim=True)
+            recon_quats = recon_quats / quat_norms
+
+            # Ensure scales are positive and opacity in [0, 1]
+            recon_scales = torch.abs(recon_scales)
+            recon_opacities = torch.clamp(recon_opacities, 0, 1)
+
+            # Prepare params for rendering (convert to float32 for gsplat)
+            recon_params = {
+                'means': voxel_positions_world.float().to(device),
+                'quats': recon_quats.float().to(device),
+                'scales': recon_scales.float().to(device),
+                'opacities': recon_opacities.float().to(device),
+                'colors': recon_colors.float().to(device)
+            }
+
+            # Original params for comparison
+            C_orig_cpu = C.cpu()
+            orig_quats = C_orig_cpu[:, 0:4]
+            orig_scales = C_orig_cpu[:, 4:7]
+            orig_opacities = C_orig_cpu[:, 7]
+            orig_colors = C_orig_cpu[:, 8:]
+
+            # Normalize original quaternions
+            orig_quat_norms = orig_quats.norm(dim=1, keepdim=True)
+            zero_norm_mask_orig = (orig_quat_norms.squeeze() < 1e-8)
+            if zero_norm_mask_orig.any():
+                identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=orig_quats.dtype)
+                orig_quats[zero_norm_mask_orig] = identity_quat
+                orig_quat_norms = orig_quats.norm(dim=1, keepdim=True)
+            orig_quats = orig_quats / orig_quat_norms
+            orig_scales = torch.abs(orig_scales)
+            orig_opacities = torch.clamp(orig_opacities, 0, 1)
+
+            orig_params = {
+                'means': voxel_positions_world.float().to(device),
+                'quats': orig_quats.float().to(device),
+                'scales': orig_scales.float().to(device),
+                'opacities': orig_opacities.float().to(device),
+                'colors': orig_colors.float().to(device)
+            }
+
+            # Render comparison
+            render_output_dir = os.path.join(output_dir, f"renders_step{step}_frame{frame}")
+            print(f"  Rendering comparison (original attributes vs reconstructed)...")
+            rendering_metrics = try_render_comparison(
+                orig_params,
+                recon_params,
+                n_views=50,
+                output_dir=render_output_dir
+            )
+
+            if rendering_metrics:
+                print(f"  Rendering PSNR: {rendering_metrics['psnr_avg']:.2f} ± {rendering_metrics['psnr_std']:.2f} dB")
+                print(f"  Renders saved to: {render_output_dir}")
+            else:
+                print(f"  ⚠ Rendering unavailable")
+            print(f"===============================================\n")
 
         logger.info(
             f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"

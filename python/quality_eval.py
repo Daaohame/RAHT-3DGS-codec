@@ -21,7 +21,9 @@ def save_ply(
     quats: torch.Tensor,
     scales: torch.Tensor,
     opacities: torch.Tensor,
-    colors: torch.Tensor
+    colors: torch.Tensor,
+    voxel_size: float = None,
+    vmin: torch.Tensor = None
 ) -> None:
     """
     Save 3D Gaussians to a PLY file.
@@ -33,6 +35,8 @@ def save_ply(
         scales: [N, 3] Scales
         opacities: [N] Opacities
         colors: [N, C] Colors (spherical harmonics coefficients)
+        voxel_size: Optional voxel size for voxelized Gaussians
+        vmin: Optional [3] minimum voxel bounds for voxelized Gaussians
     """
     N = means.shape[0]
     color_dim = colors.shape[1]
@@ -52,6 +56,14 @@ def save_ply(
         # Write header
         f.write(b"ply\n")
         f.write(b"format binary_little_endian 1.0\n")
+
+        # Add voxel metadata as comments if provided
+        if voxel_size is not None:
+            f.write(f"comment voxel_size {voxel_size}\n".encode())
+        if vmin is not None:
+            vmin_np = vmin.detach().cpu().float().numpy()
+            f.write(f"comment vmin {vmin_np[0]} {vmin_np[1]} {vmin_np[2]}\n".encode())
+
         f.write(f"element vertex {N}\n".encode())
 
         # Position properties

@@ -269,22 +269,25 @@ def read_ply_file(filename: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         warnings.warn(f"An error occurred while processing {filename}: {e}")
         return None
 
-def read_compressed_3dgs_ply(filename: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+def read_compressed_3dgs_ply(filename: str) -> Optional[Tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]]:
     """
     Reads a compressed 3DGS PLY file with integer voxel positions and merged attributes.
 
     This function is specialized for PLY files saved by test_voxelize_3dgs.py, which contain:
     - Integer voxel positions [0, 2^J-1] (stored as floats in PLY)
     - Merged Gaussian attributes: quaternions (4), scales (3), opacity (1), SH colors (48)
+    - Voxel metadata: voxel_size and vmin (stored as comments in header)
 
     Args:
         filename (str): Path to the compressed 3DGS PLY file.
 
     Returns:
-        Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        Optional[Tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]]:
             - V_int (torch.Tensor): Nx3 tensor of integer voxel coordinates [0, 2^J-1]
-            - attributes (torch.Tensor): NxC tensor of merged attributes; 
+            - attributes (torch.Tensor): NxC tensor of merged attributes;
                 for example, C=56 for quats(4) + scales(3) + opacity(1) + colors(48)
+            - voxel_size (float): Voxel size used for voxelization
+            - vmin (torch.Tensor): 3-element tensor with minimum voxel bounds
             Returns None if an error occurs.
     """
     try:
@@ -299,18 +302,34 @@ def read_compressed_3dgs_ply(filename: str) -> Optional[Tuple[torch.Tensor, torc
                 if line == 'end_header':
                     break
 
-            # Parse header for vertex count and format
+            # Parse header for vertex count, format, and voxel metadata
             num_vertices = 0
             is_binary = False
+            voxel_size = None
+            vmin = None
+
             for line in header_lines:
                 if line.startswith('format'):
                     if 'binary' in line:
                         is_binary = True
                 elif line.startswith('element vertex'):
                     num_vertices = int(line.split()[-1])
+                elif line.startswith('comment voxel_size'):
+                    voxel_size = float(line.split()[-1])
+                elif line.startswith('comment vmin'):
+                    parts = line.split()
+                    vmin = torch.tensor([float(parts[2]), float(parts[3]), float(parts[4])], dtype=torch.float32)
 
             if num_vertices == 0:
                 raise ValueError("Could not find vertex count in PLY header")
+
+            if voxel_size is None:
+                warnings.warn("Could not find voxel_size in PLY header comments")
+                voxel_size = 1.0  # Default value
+
+            if vmin is None:
+                warnings.warn("Could not find vmin in PLY header comments")
+                vmin = torch.zeros(3, dtype=torch.float32)  # Default value
 
             # Read vertex data
             if is_binary:
@@ -351,7 +370,7 @@ def read_compressed_3dgs_ply(filename: str) -> Optional[Tuple[torch.Tensor, torc
             else:
                 raise ValueError("ASCII format not supported for compressed 3DGS PLY. Use binary format.")
 
-            return V_int, attributes
+            return V_int, attributes, voxel_size, vmin
 
     except FileNotFoundError:
         warnings.warn(f"File not found: {filename}")

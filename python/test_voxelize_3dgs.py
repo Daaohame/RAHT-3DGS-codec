@@ -260,7 +260,8 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     # Save compressed Nvox Gaussians using integer voxel coordinates
     compressed_ply_path = os.path.join(output_dir, "compressed_Nvox_gaussians.ply")
     save_ply(compressed_ply_path, voxel_positions_int, merged_quats, merged_scales,
-             merged_opacities, merged_colors)
+             merged_opacities, merged_colors,
+             voxel_size=voxel_info['voxel_size'], vmin=voxel_info['vmin'])
 
     # 5. File size comparison
     import os as os_module
