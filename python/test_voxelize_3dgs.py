@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Test script for 3DGS compression using Nvox Gaussians with position delta encoding.
+Test script for actual 3DGS compression using Nvox Gaussians.
 
-This script demonstrates compression with position residuals:
-- Uses integer voxel positions (PCvox) for RAHT tree structure
-- Encodes position delta (merged_means - voxel_center) as an attribute
-- Reconstructs high-quality positions: voxel_center + delta
-
-This approach preserves position accuracy while using integer coordinates for RAHT.
+This script demonstrates Goal 2: Actual Compression/Deployment
+- Compresses N Gaussians to Nvox merged Gaussians
+- Renders directly with Nvox (no expansion to N)
+- Measures compression quality (how much quality loss from reducing Gaussian count)
+- Evaluates file size reduction and rendering speedup
 """
 
 import torch
@@ -91,14 +90,58 @@ def extract_gaussian_params(checkpoint, device='cuda'):
     return params
 
 
-def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_delta", device='cuda'):
+def warmup_cuda_kernels(params, J, device):
     """
-    Compress 3DGS from N to Nvox Gaussians with position delta encoding.
+    Warmup CUDA kernels to avoid JIT compilation overhead during timing.
 
-    This function demonstrates compression with position residuals:
-    - Uses integer voxel positions (PCvox) for RAHT tree structure
-    - Computes position delta: merged_means - voxel_center_world
-    - Reconstructs positions for rendering: voxel_center + delta
+    Args:
+        params: Gaussian parameters dictionary
+        J: Octree depth for voxelization
+        device: CUDA device
+    """
+    N = params['means'].shape[0]
+    positions = params['means']
+
+    # Warmup voxelization
+    for _ in range(3):
+        voxelize_pc_batched(positions, J=J, device=device)
+
+    # Warmup merge - need dummy cluster indices from voxelization
+    dummy_pcvox, dummy_pcsorted, dummy_voxel_indices, dummy_deltapc, dummy_info = voxelize_pc_batched(
+        positions, J=J, device=device
+    )
+    dummy_sort_idx = dummy_info['sort_idx']
+    dummy_cluster_indices = dummy_sort_idx.int()
+    dummy_cluster_offsets = torch.cat([
+        dummy_voxel_indices,
+        torch.tensor([N], dtype=torch.int32, device=device)
+    ]).int()
+
+    for _ in range(3):
+        _ = merge_gaussian_clusters_with_indices(
+            params['means'],
+            params['quats'],
+            params['scales'],
+            params['opacities'],
+            params['colors'],
+            dummy_cluster_indices,
+            dummy_cluster_offsets,
+            weight_by_opacity=True
+        )
+
+    # Ensure all warmup operations complete before returning
+    torch.cuda.synchronize()
+
+
+def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cuda'):
+    """
+    Compress 3DGS from N to Nvox Gaussians.
+
+    This function demonstrates actual compression:
+    - Voxelize positions
+    - Merge all attributes
+    - Render with Nvox Gaussians (no expansion)
+    - Compare quality: N original vs Nvox compressed
 
     Args:
         ckpt_path: Path to the 3DGS checkpoint
@@ -107,7 +150,7 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
         device: CUDA device to use (e.g., 'cuda', 'cuda:0', 'cuda:1')
     """
     print("=" * 80)
-    print("3DGS Compression: N → Nvox Gaussians (with Position Delta)")
+    print("3DGS Compression: N → Nvox Gaussians")
     print("=" * 80)
     print(f"Using device: {device}")
 
@@ -118,48 +161,64 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
     N = params['means'].shape[0]
     print(f"Number of Gaussians: {N}")
 
-    # 1. Voxelize positions
-    positions = params['means']
+    # Warmup CUDA kernels to avoid JIT compilation overhead
+    warmup_cuda_kernels(params, J, device)
 
-    # Warmup
-    for _ in range(3):
-        voxelize_pc_batched(positions, J=J, device=device)
-
+    # ========== COMPRESSION PIPELINE ==========
     print(f"\n" + "=" * 80)
     print(f"COMPRESSION PIPELINE (J={J})")
     print("=" * 80)
 
+    # Start timing the full compression pipeline (voxelization + cluster construction + merge)
+    # Synchronize once at the start to ensure clean slate
+    torch.cuda.synchronize()
+    compression_start_time = time.time()
+    voxel_start_time = time.time()
+
+    # 1. Voxelize positions
     PCvox, PCsorted, voxel_indices, DeltaPC, voxel_info = voxelize_pc_batched(
-        positions, J=J, device=device
+        params['means'], J=J, device=device
     )
+
+    # Measure synchronization time (= GPU execution time)
+    voxel_pre_sync = time.time()
+    torch.cuda.synchronize()
+    voxel_post_sync = time.time()
+    voxel_sync_time = voxel_post_sync - voxel_pre_sync
+    voxel_elapsed_time = voxel_post_sync - voxel_start_time
 
     Nvox = voxel_info['Nvox']
 
-    print(f"Compression ratio: {N / Nvox:.2f}x ({N} → {Nvox} Gaussians)")
-    print(f"Voxel size: {voxel_info['voxel_size']:.6f}")
+    print(f"⏱️  Voxelization time: {voxel_elapsed_time*1000:.2f} ms (GPU wait: {voxel_sync_time*1000:.2f} ms)")
+    print(f"📊 Compression ratio: {N / Nvox:.2f}x ({N} → {Nvox} Gaussians)")
+    print(f"📏 Voxel size: {voxel_info['voxel_size']:.6f}")
 
     # 2. Construct cluster indices directly from voxelization output
+    cluster_start_time = time.time()
+
+    # sort_idx tells us which original Gaussian each sorted position corresponds to
+    # This is exactly what cluster_indices needs - an indirection array!
     sort_idx = voxel_info['sort_idx']
     cluster_indices = sort_idx.int()
 
+    # cluster_offsets marks the boundaries of each cluster (voxel)
+    # voxel_indices already tells us where each voxel starts, just append N
     cluster_offsets = torch.cat([
         voxel_indices,
         torch.tensor([N], dtype=torch.int32, device=device)
     ]).int()
 
+    # Measure synchronization time
+    cluster_pre_sync = time.time()
+    torch.cuda.synchronize()
+    cluster_post_sync = time.time()
+    cluster_sync_time = cluster_post_sync - cluster_pre_sync
+    cluster_elapsed_time = cluster_post_sync - cluster_start_time
+
+    print(f"⏱️  Cluster construction time: {cluster_elapsed_time*1000:.2f} ms (GPU wait: {cluster_sync_time*1000:.2f} ms)")
+
     # 3. Merge all attributes
-    # Warmup
-    for _ in range(3):
-        _ = merge_gaussian_clusters_with_indices(
-            params['means'],
-            params['quats'],
-            params['scales'],
-            params['opacities'],
-            params['colors'],
-            cluster_indices,
-            cluster_offsets,
-            weight_by_opacity=True
-        )
+    merge_start_time = time.time()
 
     merged_means, merged_quats, merged_scales, merged_opacities, merged_colors = \
         merge_gaussian_clusters_with_indices(
@@ -173,34 +232,24 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
             weight_by_opacity=True
         )
 
-    # 4. Compute position delta
-    # PCvox[:, :3] contains integer voxel coordinates
-    # Convert to world coordinates (voxel centers)
+    # Measure synchronization time and calculate total
+    merge_pre_sync = time.time()
+    torch.cuda.synchronize()
+    merge_post_sync = time.time()
+    merge_sync_time = merge_post_sync - merge_pre_sync
+    merge_elapsed_time = merge_post_sync - merge_start_time
+    compression_elapsed_time = merge_post_sync - compression_start_time
+
+    print(f"⏱️  Attribute merging time: {merge_elapsed_time*1000:.2f} ms (GPU wait: {merge_sync_time*1000:.2f} ms)")
+    print(f"⏱️  Total compression time: {compression_elapsed_time*1000:.2f} ms")
+
+    # Use PCvox integer positions instead of merged_means
+    # PCvox[:, :3] contains integer voxel coordinates - this is what RAHT needs
+    # For rendering/PLY, convert back to world coordinates (voxel centers)
     voxel_positions_int = PCvox[:, :3]  # Integer voxel coordinates [0, 2^J - 1]
     voxel_positions_world = (voxel_positions_int + 0.5) * voxel_info['voxel_size'] + voxel_info['vmin']
 
-    # Position delta: difference between merged_means and voxel center
-    # This will be encoded as an attribute via RAHT
-    position_delta = merged_means - voxel_positions_world
-
-    # Statistics on position delta
-    delta_magnitude = torch.norm(position_delta, dim=1)
-    print(f"\nPosition Delta Statistics:")
-    print(f"  Mean magnitude: {delta_magnitude.mean().item():.6f}")
-    print(f"  Max magnitude: {delta_magnitude.max().item():.6f}")
-    print(f"  Relative to voxel size: {delta_magnitude.mean().item() / voxel_info['voxel_size']:.2%}")
-
-    # 5. Reconstruct positions for rendering
-    # In actual pipeline: decode voxel_positions_int from RAHT tree structure
-    #                     decode position_delta from RAHT attribute encoding
-    #                     final_position = voxel_center + delta
-    reconstructed_positions = voxel_positions_world + position_delta
-
-    # Verify reconstruction matches merged_means
-    reconstruction_error = torch.norm(reconstructed_positions - merged_means, dim=1).max().item()
-    print(f"  Reconstruction error (should be ~0): {reconstruction_error:.2e}")
-
-    # 6. Save compressed PLY files
+    # 4. Save compressed PLY files
     os.makedirs(output_dir, exist_ok=True)
 
     # Save original N Gaussians
@@ -208,12 +257,12 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
     save_ply(original_ply_path, params['means'], params['quats'], params['scales'],
              params['opacities'], params['colors'])
 
-    # Save compressed Nvox Gaussians (using reconstructed positions)
+    # Save compressed Nvox Gaussians (using voxel center positions, not weighted means)
     compressed_ply_path = os.path.join(output_dir, "compressed_Nvox_gaussians.ply")
-    save_ply(compressed_ply_path, reconstructed_positions, merged_quats, merged_scales,
+    save_ply(compressed_ply_path, voxel_positions_world, merged_quats, merged_scales,
              merged_opacities, merged_colors)
 
-    # 7. File size comparison
+    # 5. File size comparison
     import os as os_module
     original_size = os_module.path.getsize(original_ply_path)
     compressed_size = os_module.path.getsize(compressed_ply_path)
@@ -222,18 +271,15 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
     print(f"\n" + "=" * 80)
     print("FILE SIZE COMPARISON")
     print("=" * 80)
-    print(f"Original (N={N}): {original_size / 1024 / 1024:.2f} MB")
-    print(f"Compressed (Nvox={Nvox}): {compressed_size / 1024 / 1024:.2f} MB")
-    print(f"Size reduction: {size_reduction:.1f}%")
-    print(f"\nNote: Position delta (3 floats per Gaussian) adds {Nvox * 3 * 4 / 1024 / 1024:.2f} MB")
-    print(f"      This will be RAHT-encoded for additional compression")
+    print(f"📁 Original (N={N}): {original_size / 1024 / 1024:.2f} MB")
+    print(f"📁 Compressed (Nvox={Nvox}): {compressed_size / 1024 / 1024:.2f} MB")
+    print(f"💾 Size reduction: {size_reduction:.1f}%")
 
-    # 8. Rendering comparison
+    # 6. Rendering comparison: N original vs Nvox compressed
     print(f"\n" + "=" * 80)
     print("QUALITY EVALUATION")
     print("=" * 80)
     print(f"Comparing: {N} original Gaussians vs {Nvox} compressed Gaussians")
-    print(f"Using reconstructed positions (voxel_center + delta)")
 
     # Prepare original params (N Gaussians)
     original_params = {
@@ -244,9 +290,11 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
         'colors': params['colors']
     }
 
-    # Prepare compressed params (Nvox Gaussians with reconstructed positions)
+    # Prepare compressed params (Nvox Gaussians - NO expansion!)
+    # Use voxel center positions (quantized) instead of weighted means
+    # This reflects actual compression: integer positions → world coords
     compressed_params = {
-        'means': reconstructed_positions,
+        'means': voxel_positions_world,
         'quats': merged_quats,
         'scales': merged_scales,
         'opacities': merged_opacities,
@@ -265,17 +313,19 @@ def compress_to_nvox_with_delta(ckpt_path, J=10, output_dir="output_compressed_d
         'original_count': N,
         'compressed_count': Nvox,
         'compression_ratio': N / Nvox,
+        'voxel_time_ms': voxel_elapsed_time * 1000,
+        'voxel_sync_ms': voxel_sync_time * 1000,
+        'cluster_time_ms': cluster_elapsed_time * 1000,
+        'cluster_sync_ms': cluster_sync_time * 1000,
+        'merge_time_ms': merge_elapsed_time * 1000,
+        'merge_sync_ms': merge_sync_time * 1000,
+        'total_time_ms': compression_elapsed_time * 1000,
         'original_size_mb': original_size / 1024 / 1024,
         'compressed_size_mb': compressed_size / 1024 / 1024,
         'size_reduction_percent': size_reduction,
         'rendering_metrics': rendering_metrics,
         'original_ply_path': original_ply_path,
         'compressed_ply_path': compressed_ply_path,
-        # Position delta info (for RAHT encoding)
-        'voxel_positions_int': voxel_positions_int,
-        'position_delta': position_delta,
-        'delta_mean_magnitude': delta_magnitude.mean().item(),
-        'delta_max_magnitude': delta_magnitude.max().item(),
     }
 
 
@@ -283,27 +333,27 @@ if __name__ == '__main__':
     ckpt_path = "/ssd1/rajrup/Project/gsplat/results/actorshq_l1_0.5_ssim_0.5_alpha_1.0/Actor01/Sequence1/resolution_4/0/ckpts/ckpt_29999_rank0.pt"
 
     try:
-        results = compress_to_nvox_with_delta(
+        results = compress_to_nvox(
             ckpt_path,
             J=10,  # Octree depth for voxelization
-            output_dir="output_compressed_delta",
-            device="cuda:0"
+            output_dir="output_compressed",
+            device="cuda:0"  # Change to "cuda:0", "cuda:1", etc. to use a specific GPU
         )
 
         print("\n" + "=" * 80)
         print("COMPRESSION RESULTS SUMMARY")
         print("=" * 80)
         print(f"Gaussians: {results['original_count']} → {results['compressed_count']} ({results['compression_ratio']:.2f}x)")
-        print(f"File size: {results['original_size_mb']:.2f} MB → {results['compressed_size_mb']:.2f} MB ({results['size_reduction_percent']:.1f}% reduction)")
-        print(f"\nPosition Delta:")
-        print(f"  Mean magnitude: {results['delta_mean_magnitude']:.6f}")
-        print(f"  Max magnitude: {results['delta_max_magnitude']:.6f}")
+        print(f"⏱️  Total compression time: {results['total_time_ms']:.2f} ms")
+        print(f"  ├─ Voxelization: {results['voxel_time_ms']:.2f} ms (GPU: {results['voxel_sync_ms']:.2f} ms)")
+        print(f"  ├─ Cluster construction: {results['cluster_time_ms']:.2f} ms (GPU: {results['cluster_sync_ms']:.2f} ms)")
+        print(f"  └─ Merging: {results['merge_time_ms']:.2f} ms (GPU: {results['merge_sync_ms']:.2f} ms)")
+        print(f"💾 File size: {results['original_size_mb']:.2f} MB → {results['compressed_size_mb']:.2f} MB ({results['size_reduction_percent']:.1f}% reduction)")
 
         if results['rendering_metrics']:
             render_metrics = results['rendering_metrics']
-            print(f"\nRendering Quality:")
-            print(f"  PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
-            print(f"  Range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
+            print(f"🎨 PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
+            print(f"   Range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
 
     except Exception as e:
         print(f"\nError during processing: {e}")
