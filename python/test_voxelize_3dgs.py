@@ -257,9 +257,9 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
     save_ply(original_ply_path, params['means'], params['quats'], params['scales'],
              params['opacities'], params['colors'])
 
-    # Save compressed Nvox Gaussians (using voxel center positions, not weighted means)
+    # Save compressed Nvox Gaussians using integer voxel coordinates
     compressed_ply_path = os.path.join(output_dir, "compressed_Nvox_gaussians.ply")
-    save_ply(compressed_ply_path, voxel_positions_world, merged_quats, merged_scales,
+    save_ply(compressed_ply_path, voxel_positions_int, merged_quats, merged_scales,
              merged_opacities, merged_colors)
 
     # 5. File size comparison
@@ -290,9 +290,7 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
         'colors': params['colors']
     }
 
-    # Prepare compressed params (Nvox Gaussians - NO expansion!)
-    # Use voxel center positions (quantized) instead of weighted means
-    # This reflects actual compression: integer positions → world coords
+    # Prepare compressed params (Nvox Gaussians)
     compressed_params = {
         'means': voxel_positions_world,
         'quats': merged_quats,

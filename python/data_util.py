@@ -269,6 +269,100 @@ def read_ply_file(filename: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         warnings.warn(f"An error occurred while processing {filename}: {e}")
         return None
 
+def read_compressed_3dgs_ply(filename: str) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Reads a compressed 3DGS PLY file with integer voxel positions and merged attributes.
+
+    This function is specialized for PLY files saved by test_voxelize_3dgs.py, which contain:
+    - Integer voxel positions [0, 2^J-1] (stored as floats in PLY)
+    - Merged Gaussian attributes: quaternions (4), scales (3), opacity (1), SH colors (48)
+
+    Args:
+        filename (str): Path to the compressed 3DGS PLY file.
+
+    Returns:
+        Optional[Tuple[torch.Tensor, torch.Tensor]]:
+            - V_int (torch.Tensor): Nx3 tensor of integer voxel coordinates [0, 2^J-1]
+            - attributes (torch.Tensor): NxC tensor of merged attributes; 
+                for example, C=56 for quats(4) + scales(3) + opacity(1) + colors(48)
+            Returns None if an error occurs.
+    """
+    try:
+        import struct
+
+        with open(filename, 'rb') as f:
+            # Read header to find format and vertex count
+            header_lines = []
+            while True:
+                line = f.readline().decode('ascii').strip()
+                header_lines.append(line)
+                if line == 'end_header':
+                    break
+
+            # Parse header for vertex count and format
+            num_vertices = 0
+            is_binary = False
+            for line in header_lines:
+                if line.startswith('format'):
+                    if 'binary' in line:
+                        is_binary = True
+                elif line.startswith('element vertex'):
+                    num_vertices = int(line.split()[-1])
+
+            if num_vertices == 0:
+                raise ValueError("Could not find vertex count in PLY header")
+
+            # Read vertex data
+            if is_binary:
+                # Binary format: x,y,z (float), nx,ny,nz (float),
+                # f_dc_0..2 (float), f_rest_0..44 (float), opacity (float),
+                # scale_0..2 (float), rot_0..3 (float)
+                # Total: 3 + 3 + 3 + 45 + 1 + 3 + 4 = 62 floats per vertex
+                vertex_dtype = np.dtype([
+                    ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),          # positions (3)
+                    ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),       # normals (3)
+                    ('f_dc_0', 'f4'), ('f_dc_1', 'f4'), ('f_dc_2', 'f4'),  # SH DC (3)
+                    *[(f'f_rest_{i}', 'f4') for i in range(45)],   # SH rest (45)
+                    ('opacity', 'f4'),                              # opacity (1)
+                    ('scale_0', 'f4'), ('scale_1', 'f4'), ('scale_2', 'f4'),  # scales (3)
+                    ('rot_0', 'f4'), ('rot_1', 'f4'), ('rot_2', 'f4'), ('rot_3', 'f4')  # quaternions (4)
+                ])
+
+                data = np.fromfile(f, dtype=vertex_dtype, count=num_vertices)
+
+                # Extract positions (as integers)
+                positions = np.stack([data['x'], data['y'], data['z']], axis=1)
+                V_int = torch.from_numpy(positions).long()  # Convert to integer coordinates
+
+                # Extract attributes in order: quats (4), scales (3), opacity (1), colors (48)
+                quats = np.stack([data['rot_0'], data['rot_1'], data['rot_2'], data['rot_3']], axis=1)
+                scales = np.stack([data['scale_0'], data['scale_1'], data['scale_2']], axis=1)
+                opacity = data['opacity'].reshape(-1, 1)
+
+                # SH colors: DC (3) + rest (45) = 48 total
+                sh_dc = np.stack([data['f_dc_0'], data['f_dc_1'], data['f_dc_2']], axis=1)
+                sh_rest = np.stack([data[f'f_rest_{i}'] for i in range(45)], axis=1)
+                colors = np.concatenate([sh_dc, sh_rest], axis=1)
+
+                # Concatenate all attributes: [quats(4), scales(3), opacity(1), colors(48)] = 56
+                attributes = np.concatenate([quats, scales, opacity, colors], axis=1)
+                attributes = torch.from_numpy(attributes).float()
+
+            else:
+                raise ValueError("ASCII format not supported for compressed 3DGS PLY. Use binary format.")
+
+            return V_int, attributes
+
+    except FileNotFoundError:
+        warnings.warn(f"File not found: {filename}")
+        return None
+    except Exception as e:
+        warnings.warn(f"Error reading compressed 3DGS PLY {filename}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def get_pointcloud(dataset: str, sequence: str, frame: int, data_root: str = '.') -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Retrieves a point cloud for a specific frame from a given dataset and sequence.
