@@ -10,7 +10,7 @@ Voxelization converts a **continuous point cloud** into a **discrete voxel grid*
 Multiple points falling into the same voxel are **merged** (attributes averaged). This enables:
 - **Compression**: Fewer voxels than points
 - **RAHT encoding**: Integer coords for octree-based transform
-- **Spatial indexing**: Morton code ordering for cache-friendly access
+- **Morton ordering**: Required for RAHT octree processing and efficient voxel grouping
 
 ---
 
@@ -49,6 +49,12 @@ V_integer = floor(V / voxel_size)
 
 **Step 2: Compute Morton Codes & Sort**
 
+Morton codes map 3D voxel coordinates to 1D integers via bit interleaving (Z-order curve).
+This serves three purposes:
+1. **Unique voxel IDs**: Points with same Morton code → same voxel
+2. **RAHT requirement**: Downstream compression needs Morton-ordered octree traversal
+3. **Efficient grouping**: Sorting groups identical voxels consecutively for O(N) boundary detection
+
 ```
 Morton codes (interleave x,y,z bits → single integer):
   [0,0,0] → 0   (P0, P2, P7)
@@ -59,15 +65,19 @@ Morton codes (interleave x,y,z bits → single integer):
 
 Sorted order by Morton code:
   sort_idx = [0, 2, 7, 5, 4, 3, 1, 6]
-              ─────────  ─  ─  ─  ─────
-              voxel 0    1  2  3  voxel 4
+              ───────  ─  ─  ─  ────
+              voxel 0  1  2  3    4
 ```
 
 **Step 3: Find Voxel Boundaries**
 
 ```
-voxel_indices = [0, 3, 4, 5, 6]  ← start index of each voxel in sorted array
+voxel_boundary = M_sort[1:] - M_sort[:-1]  # Detect consecutive Morton code changes
+                = [0, 0, 9, 13, 20, 21, 0]
+                         ^  ^   ^   ^ 
+                        NEW NEW NEW NEW
 
+voxel_indices = [0, 3, 4, 5, 6]  ← start index of each voxel in sorted array
 Nvox = 5 unique voxels
 ```
 
