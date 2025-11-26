@@ -95,7 +95,7 @@ def voxelize_pc_batched(
         width = V0.max().item()
 
     voxel_size = width / (2 ** J)
-    V0_integer = torch.floor(V0 / voxel_size).long()
+    V0_integer = torch.clamp(torch.floor(V0 / voxel_size).long(), 0, 2**J - 1)
 
     M = get_morton_code(V0_integer, J)
     M_sort, idx = torch.sort(M)
