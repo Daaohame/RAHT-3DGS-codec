@@ -18,7 +18,7 @@ import rlgr
 ## Configuration
 ## ---------------------
 torch.backends.cudnn.benchmark=False # for benchmarking
-DEBUG = True  # Enable for correctness checks
+DEBUG = False  # Enable for correctness checks
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 raht_fn = {
     "RAHT": RAHT2_optimized,
@@ -35,13 +35,21 @@ output_dir = 'output_compressed'
 
 nSteps = len(colorStep)
 rates = torch.zeros((T, nSteps), dtype=torch.float64)
+
+# Timing arrays - all times in seconds
 raht_param_time = torch.zeros((T, nSteps), dtype=torch.float64)
 raht_transform_time = torch.zeros((T, nSteps), dtype=torch.float64)
 quant_time = torch.zeros((T, nSteps), dtype=torch.float64)
+coeff_reorder_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)  # New: coefficient reordering for encoding
 entropy_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)
 entropy_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)
 dequant_time = torch.zeros((T, nSteps), dtype=torch.float64)
+coeff_reorder_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)  # New: coefficient reordering for decoding
 iRAHT_time = torch.zeros((T, nSteps), dtype=torch.float64)
+total_enc_time = torch.zeros((T, nSteps), dtype=torch.float64)          # New: total encoding time
+total_dec_time = torch.zeros((T, nSteps), dtype=torch.float64)          # New: total decoding time
+pipeline_time = torch.zeros((T, nSteps), dtype=torch.float64)           # New: end-to-end pipeline time (RAHT prelude + enc + dec)
+
 psnr = torch.zeros((T, nSteps), dtype=torch.float64)
 Nvox = torch.zeros(T)
 
@@ -50,6 +58,7 @@ Nvox = torch.zeros(T)
 ## Logging setup
 ## ---------------------
 log_filename = f'../results/runtime_3dgs.csv'
+os.makedirs(os.path.dirname(log_filename), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(message)s',
@@ -58,7 +67,13 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logger.info("Frame,Quantization_Step,Rate_bpp,RAHT_prelude_time,RAHT_transform_time, Quant_time,Entropy_enc_time,Entropy_dec_time,Dequant_time,iRAHT_time,PSNR_all,PSNR_quats,PSNR_scales,PSNR_opacity,PSNR_colors")
+logger.info("Frame,Quantization_Step,Rate_bpp,"
+            "RAHT_prelude_time,RAHT_transform_time,Quant_time,"
+            "Coeff_reorder_enc_time,Entropy_enc_time,"
+            "Entropy_dec_time,Dequant_time,"
+            "Coeff_reorder_dec_time,iRAHT_time,"
+            "Total_enc_time,Total_dec_time,Pipeline_time,"
+            "PSNR_all,PSNR_quats,PSNR_scales,PSNR_opacity,PSNR_colors")
 
 
 ## ---------------------
@@ -121,23 +136,28 @@ for frame_idx in range(T):
     n_channels = attributes.shape[1]
     Nvox[frame_idx] = N
 
-    # Treat all attributes as "colors" for RAHT
     attributes = attributes.to(dtype=DTYPE).contiguous()
     C = to_dev(attributes)
+    torch.cuda.synchronize()  # Ensure transfer completes before timing RAHT
     V = V_quantized.to(dtype=DTYPE).to(device)
 
     frame_start = time.time()
     origin = torch.tensor([0, 0, 0], dtype=V.dtype, device=device)
+
+    # Measure RAHT parameter construction (prelude)
     start_time = time.time()
     ListC, FlagsC, weightsC, order_RAGFT = raht_fn["RAHT_param"](V, origin, 2 ** J, J)
+    torch.cuda.synchronize()  # Ensure GPU operations complete
     raht_param_time[frame_idx, :] = time.time() - start_time
 
     ListC = [t.to(device=device, non_blocking=True) for t in ListC]
     FlagsC = [t.to(device=device, non_blocking=True) for t in FlagsC]
     weightsC = [t.to(device=device, non_blocking=True) for t in weightsC]
 
+    # Measure RAHT transform
     start_time = time.time()
     Coeff, w = raht_fn["RAHT"](C, ListC, FlagsC, weightsC)
+    torch.cuda.synchronize()  # Ensure GPU operations complete
     raht_transform_time[frame_idx, :] = time.time() - start_time
     print(f"RAHT transform complete. Coeff shape: {Coeff.shape}")
 
@@ -179,41 +199,21 @@ for frame_idx in range(T):
     for i in range(nSteps):
         step = colorStep[i]
 
-        # Analyze quantization appropriateness
-        if DEBUG and i == 0:
-            print(f"\n=== QUANTIZATION ANALYSIS (step={step}) ===")
-            # Compute coefficient ranges per attribute type
-            coeff_quats = Coeff[:, 0:4]
-            coeff_scales = Coeff[:, 4:7]
-            coeff_opacity = Coeff[:, 7]
-            coeff_colors = Coeff[:, 8:]
-
-            print(f"Coefficient ranges (before quantization):")
-            print(f"  Quats (ch 0-3):   [{coeff_quats.min():.4f}, {coeff_quats.max():.4f}], range={coeff_quats.max()-coeff_quats.min():.4f}")
-            print(f"  Scales (ch 4-6):  [{coeff_scales.min():.4f}, {coeff_scales.max():.4f}], range={coeff_scales.max()-coeff_scales.min():.4f}")
-            print(f"  Opacity (ch 7):   [{coeff_opacity.min():.4f}, {coeff_opacity.max():.4f}], range={coeff_opacity.max()-coeff_opacity.min():.4f}")
-            print(f"  Colors (ch 8+):   [{coeff_colors.min():.4f}, {coeff_colors.max():.4f}], range={coeff_colors.max()-coeff_colors.min():.4f}")
-
-            print(f"\nQuantization step={step} relative to coefficient ranges:")
-            print(f"  Quats:   step/range = {step/(coeff_quats.max()-coeff_quats.min()+1e-10):.4f} ({step/(coeff_quats.max()-coeff_quats.min()+1e-10)*100:.1f}%)")
-            print(f"  Scales:  step/range = {step/(coeff_scales.max()-coeff_scales.min()+1e-10):.4f} ({step/(coeff_scales.max()-coeff_scales.min()+1e-10)*100:.1f}%)")
-            print(f"  Opacity: step/range = {step/(coeff_opacity.max()-coeff_opacity.min()+1e-10):.4f} ({step/(coeff_opacity.max()-coeff_opacity.min()+1e-10)*100:.1f}%)")
-            print(f"  Colors:  step/range = {step/(coeff_colors.max()-coeff_colors.min()+1e-10):.4f} ({step/(coeff_colors.max()-coeff_colors.min()+1e-10)*100:.1f}%)")
-
-            print(f"\nNumber of quantization levels:")
-            print(f"  Quats:   {int((coeff_quats.max()-coeff_quats.min())/step + 1)} levels")
-            print(f"  Scales:  {int((coeff_scales.max()-coeff_scales.min())/step + 1)} levels")
-            print(f"  Opacity: {int((coeff_opacity.max()-coeff_opacity.min())/step + 1)} levels")
-            print(f"  Colors:  {int((coeff_colors.max()-coeff_colors.min())/step + 1)} levels")
-            print(f"===========================================\n")
-
+        # Measure quantization
         start_time = time.time()
         Coeff_enc = torch.floor(Coeff / step + 0.5)
+        torch.cuda.synchronize()
         quant_time[frame_idx, i] = time.time() - start_time
 
-        # Get reordered coefficients
+        # Measure coefficient reordering for encoding
+        start_time = time.time()
         coeff_reordered = Coeff_enc.index_select(0, order_RAGFT)
+        torch.cuda.synchronize()
+        coeff_reorder_enc_time[frame_idx, i] = time.time() - start_time
+
+        # Measure GPU→CPU transfer
         coeff_cpu_i32 = coeff_reordered.to('cpu', dtype=torch.int32, non_blocking=True)
+        torch.cuda.synchronize()  # Wait for transfer to complete
         np_coeff = coeff_cpu_i32.numpy()  # zero-copy view on CPU
 
         # RLGR settings - encode all channels
@@ -247,22 +247,52 @@ for frame_idx in range(T):
         size_bytes = sum(len(b['buf']) for b in compressed.values())
         rates[frame_idx, i] = size_bytes
         entropy_enc_time[frame_idx, i] = sum(b["time_ns"] for b in compressed.values()) / 1e9
+
+        # ========== DECODING PIPELINE ==========
         entropy_dec_time[frame_idx, i] = sum(b["time_ns"] for b in decoded.values()) / 1e9
 
-        # Reconstruct coefficient array from all decoded channels
+        # CPU→GPU transfer after RLGR decoding (not timed to avoid blending CPU prep + sync)
         coeff_dec_list = [decoded[f"ch{ch}"]["out"] for ch in range(n_channels)]
         coeff_dec_cpu = np.stack(coeff_dec_list, axis=1).astype(np.int32, copy=False)
         Coeff_dec = torch.from_numpy(coeff_dec_cpu).pin_memory().to(device=device, dtype=DTYPE, non_blocking=True)
 
+        # Measure dequantization
         start_time = time.time()
         Coeff_dec = Coeff_dec * step
+        torch.cuda.synchronize()
         dequant_time[frame_idx, i] = time.time() - start_time
 
+        # Measure coefficient reordering for decoding (separate from iRAHT)
         start_time = time.time()
         order_RAGFT_dec = torch.argsort(order_RAGFT)
         Coeff_dec = Coeff_dec[order_RAGFT_dec,:]
+        torch.cuda.synchronize()
+        coeff_reorder_dec_time[frame_idx, i] = time.time() - start_time
+
+        # Measure inverse RAHT (pure transform, no reordering)
+        start_time = time.time()
         C_rec = raht_fn["iRAHT"](Coeff_dec, ListC, FlagsC, weightsC)
+        torch.cuda.synchronize()
         iRAHT_time[frame_idx, i] = time.time() - start_time
+
+        # Total times derived from breakdown to keep sums consistent
+        total_enc_time[frame_idx, i] = (
+            raht_transform_time[frame_idx, i]
+            + quant_time[frame_idx, i]
+            + coeff_reorder_enc_time[frame_idx, i]
+            + entropy_enc_time[frame_idx, i]
+        )
+        total_dec_time[frame_idx, i] = (
+            entropy_dec_time[frame_idx, i]
+            + dequant_time[frame_idx, i]
+            + coeff_reorder_dec_time[frame_idx, i]
+            + iRAHT_time[frame_idx, i]
+        )
+        pipeline_time[frame_idx, i] = (
+            raht_param_time[frame_idx, i]
+            + total_enc_time[frame_idx, i]
+            + total_dec_time[frame_idx, i]
+        )
 
         # Compute PSNR on decoded attributes (all channels)
         mse_all = torch.mean((C - C_rec) ** 2).item()
@@ -370,9 +400,12 @@ for frame_idx in range(T):
             print(f"===============================================\n")
 
         logger.info(
-            f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},"
-            f"{quant_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
-            f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},"
+            f"{frame},{colorStep[i]},{rates[frame_idx, i]*8/Nvox[frame_idx]:.6f},"
+            f"{raht_param_time[frame_idx, i]:.6f},{raht_transform_time[frame_idx, i]:.6f},{quant_time[frame_idx, i]:.6f},"
+            f"{coeff_reorder_enc_time[frame_idx, i]:.6f},{entropy_enc_time[frame_idx, i]:.6f},"
+            f"{entropy_dec_time[frame_idx, i]:.6f},{dequant_time[frame_idx, i]:.6f},"
+            f"{coeff_reorder_dec_time[frame_idx, i]:.6f},{iRAHT_time[frame_idx, i]:.6f},"
+            f"{total_enc_time[frame_idx, i]:.6f},{total_dec_time[frame_idx, i]:.6f},{pipeline_time[frame_idx, i]:.6f},"
             f"{psnr[frame_idx, i]:.6f},{psnr_quats:.6f},{psnr_scales:.6f},{psnr_opacity:.6f},{psnr_colors:.6f}")
 
     print(f"Frame {frame}")

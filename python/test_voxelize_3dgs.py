@@ -12,6 +12,7 @@ This script demonstrates Goal 2: Actual Compression/Deployment
 import torch
 import os
 import time
+import logging
 
 # Import merge_gaussian_clusters from the installed merge_cluster_cuda library
 from merge_cluster_cuda import merge_gaussian_clusters_with_indices
@@ -22,6 +23,29 @@ from quality_eval import (
     save_ply,
     try_render_comparison
 )
+
+
+# ---------------------
+# Logging setup
+# ---------------------
+def _init_logger():
+    log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "results", "runtime_voxelize_3dgs.csv"))
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    logger = logging.getLogger("runtime_voxelize_3dgs")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler = logging.FileHandler(log_path, mode="w")
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    logger.propagate = False
+    logger.info(
+        "Checkpoint,J,N_original,N_vox,Compression_ratio,"
+        "Voxel_time_ms,Voxel_sync_ms,Cluster_time_ms,Cluster_sync_ms,"
+        "Merge_time_ms,Merge_sync_ms,Total_time_ms,"
+        "Original_size_mb,Compressed_size_mb,Size_reduction_percent"
+    )
+    return logger, log_path
 
 
 def load_3dgs_checkpoint(ckpt_path, device='cuda'):
@@ -329,12 +353,14 @@ def compress_to_nvox(ckpt_path, J=10, output_dir="output_compressed", device='cu
 
 
 if __name__ == '__main__':
+    logger, log_path = _init_logger()
     ckpt_path = "/ssd1/rajrup/Project/gsplat/results/actorshq_l1_0.5_ssim_0.5_alpha_1.0/Actor01/Sequence1/resolution_4/0/ckpts/ckpt_29999_rank0.pt"
-
+    J = 10
+    
     try:
         results = compress_to_nvox(
             ckpt_path,
-            J=10,  # Octree depth for voxelization
+            J,
             output_dir="output_compressed",
             device="cuda:0"  # Change to "cuda:0", "cuda:1", etc. to use a specific GPU
         )
@@ -353,6 +379,18 @@ if __name__ == '__main__':
             render_metrics = results['rendering_metrics']
             print(f"🎨 PSNR: {render_metrics['psnr_avg']:.2f} ± {render_metrics['psnr_std']:.2f} dB")
             print(f"   Range: [{render_metrics['psnr_min']:.2f}, {render_metrics['psnr_max']:.2f}] dB")
+
+        logger.info(
+            f"{os.path.basename(ckpt_path)},{J},{results['original_count']},{results['compressed_count']},"
+            f"{results['compression_ratio']:.4f},"
+            f"{results['voxel_time_ms']:.4f},{results['voxel_sync_ms']:.4f},"
+            f"{results['cluster_time_ms']:.4f},{results['cluster_sync_ms']:.4f},"
+            f"{results['merge_time_ms']:.4f},{results['merge_sync_ms']:.4f},"
+            f"{results['total_time_ms']:.4f},"
+            f"{results['original_size_mb']:.4f},{results['compressed_size_mb']:.4f},"
+            f"{results['size_reduction_percent']:.4f}"
+        )
+        print(f"\nRuntime metrics saved to: {log_path}")
 
     except Exception as e:
         print(f"\nError during processing: {e}")
